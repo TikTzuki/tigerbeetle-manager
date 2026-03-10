@@ -1,0 +1,19 @@
+[package]
+name = "tigerbeetle-manager-compressor"
+description = "Compress TigerBeetle data files by creating balance snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tb-reader = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+# TigerBeetle client
+tigerbeetle-unofficial = "0.14.23+0.16.74"
+
+[lints]
+workspace = true

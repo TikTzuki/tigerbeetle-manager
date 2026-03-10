@@ -1,0 +1,238 @@
+syntax = "proto3";
+
+package tigerbeetle.manager;
+
+// Service exposed by each TigerBeetle manager node.
+service ManagerNode {
+    // Get current node status (process state, backup state, uptime, etc.).
+    rpc GetStatus (GetStatusRequest) returns (GetStatusResponse);
+
+    // Start or update the backup cron schedule.
+    rpc StartBackup (StartBackupRequest) returns (StartBackupResponse);
+
+    // Stop periodic backups.
+    rpc StopBackup (StopBackupRequest) returns (StopBackupResponse);
+
+    // Trigger an immediate one-off backup.
+    rpc TriggerBackup (TriggerBackupRequest) returns (TriggerBackupResponse);
+
+    // Update the AWS/S3 backup config (credentials, endpoint, region, etc.).
+    // The new config is persisted to the backup_config.toml file and takes
+    // effect on the next backup run.
+    rpc ModifyBackupConfig (ModifyBackupConfigRequest) returns (ModifyBackupConfigResponse);
+
+    // Get the current AWS/S3 backup config from the backup_config.toml file.
+    rpc GetBackupConfig (GetBackupConfigRequest) returns (GetBackupConfigResponse);
+
+    // Stream logs from the TigerBeetle process in real time.
+    rpc StreamLogs (StreamLogsRequest) returns (stream LogEntry);
+
+    // Read a page of accounts from the data file (direct binary read).
+    rpc ReadAccounts (ReadAccountsRequest) returns (ReadAccountsResponse);
+
+    // Read a page of transfers from the data file (direct binary read).
+    rpc ReadTransfers (ReadTransfersRequest) returns (ReadTransfersResponse);
+
+    // Read checkpointed accounts from the LSM (authoritative, with current balances).
+    rpc ReadLsmAccounts (ReadAccountsRequest) returns (ReadAccountsResponse);
+
+    // Read checkpointed transfers from the LSM.
+    rpc ReadLsmTransfers (ReadTransfersRequest) returns (ReadTransfersResponse);
+
+    // Read pre-checkpoint accounts from the WAL (initial balance values).
+    rpc ReadWalAccounts (ReadAccountsRequest) returns (ReadAccountsResponse);
+
+    // Read pre-checkpoint transfers from the WAL.
+    rpc ReadWalTransfers (ReadTransfersRequest) returns (ReadTransfersResponse);
+}
+
+// --- Status ---
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+    // Unique node identifier (e.g., "node-0").
+    string node_id = 1;
+    // TigerBeetle process state.
+    ProcessStatus process = 2;
+    // Backup configuration and state.
+    BackupStatus backup = 3;
+    // Node uptime in seconds.
+    uint64 uptime_seconds = 4;
+}
+
+enum ProcessState {
+    PROCESS_STATE_UNKNOWN = 0;
+    PROCESS_STATE_RUNNING = 1;
+    PROCESS_STATE_STOPPED = 2;
+    PROCESS_STATE_CRASHED = 3;
+    PROCESS_STATE_STARTING = 4;
+}
+
+message ProcessStatus {
+    ProcessState state = 1;
+    // OS process ID (0 if not running).
+    uint32 pid = 2;
+    // TigerBeetle executable path.
+    string exe = 3;
+    // Arguments passed to TigerBeetle.
+    repeated string args = 4;
+    // Data file path.
+    string data_file = 5;
+    // TigerBeetle listen address (e.g., "3000").
+    string address = 6;
+}
+
+message BackupStatus {
+    // Whether periodic backups are enabled.
+    bool enabled = 1;
+    // Current cron schedule (empty if disabled).
+    string cron_schedule = 2;
+    // S3 bucket name.
+    string bucket = 3;
+    // ISO 8601 timestamp of last successful backup (empty if never).
+    string last_backup_at = 4;
+    // Last backup error message (empty if last succeeded or never ran).
+    string last_error = 5;
+}
+
+// --- Backup Control ---
+
+message StartBackupRequest {
+    // Cron schedule in 5-field format (e.g., "0 0 * * *"). UTC timezone.
+    string cron_schedule = 1;
+}
+
+message StartBackupResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message StopBackupRequest {}
+
+message StopBackupResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message TriggerBackupRequest {}
+
+message TriggerBackupResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// --- Backup Config ---
+
+message ModifyBackupConfigRequest {
+    string aws_endpoint_url = 1;
+    string aws_access_key_id = 2;
+    string aws_secret_access_key = 3;
+    string aws_default_region = 4;
+    string aws_request_checksum_calculation = 5;
+    string aws_response_checksum_validation = 6;
+    // S3 bucket name. Leave empty to keep the current value.
+    string bucket = 7;
+    // Path to the TigerBeetle data file to back up. Leave empty to keep current.
+    string backup_file = 8;
+}
+
+message ModifyBackupConfigResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message GetBackupConfigRequest {}
+
+message GetBackupConfigResponse {
+    bool config_file_configured = 1;
+    string aws_endpoint_url = 2;
+    string aws_access_key_id = 3;
+    string aws_secret_access_key = 4;
+    string aws_default_region = 5;
+    string aws_request_checksum_calculation = 6;
+    string aws_response_checksum_validation = 7;
+    string bucket = 8;
+    string backup_file = 9;
+}
+
+// --- Log Streaming ---
+
+message StreamLogsRequest {
+    // Number of historical lines to replay (0 = only new lines).
+    uint32 tail = 1;
+}
+
+enum LogLevel {
+    LOG_LEVEL_UNKNOWN = 0;
+    LOG_LEVEL_INFO = 1;
+    LOG_LEVEL_WARN = 2;
+    LOG_LEVEL_ERROR = 3;
+}
+
+message LogEntry {
+    // ISO 8601 timestamp.
+    string timestamp = 1;
+    LogLevel level = 2;
+    string message = 3;
+}
+
+// --- Data File Reader ---
+
+message ReadAccountsRequest {
+    // 0-based page index.
+    uint32 page = 1;
+    // Records per page (max 500).
+    uint32 limit = 2;
+}
+
+// A single account record decoded from the data file.
+// u128 fields are encoded as decimal strings (proto has no u128 type).
+message AccountRecord {
+    string id = 1;
+    string debits_pending = 2;
+    string debits_posted = 3;
+    string credits_pending = 4;
+    string credits_posted = 5;
+    string user_data_128 = 6;
+    uint64 user_data_64 = 7;
+    uint32 user_data_32 = 8;
+    uint32 ledger = 9;
+    uint32 code = 10;
+    uint32 flags = 11;
+    uint64 timestamp = 12;
+}
+
+message ReadAccountsResponse {
+    repeated AccountRecord accounts = 1;
+    uint32 page = 2;
+    uint32 limit = 3;
+}
+
+message ReadTransfersRequest {
+    uint32 page = 1;
+    uint32 limit = 2;
+}
+
+// A single transfer record decoded from the data file.
+message TransferRecord {
+    string id = 1;
+    string debit_account_id = 2;
+    string credit_account_id = 3;
+    string amount = 4;
+    string pending_id = 5;
+    string user_data_128 = 6;
+    uint64 user_data_64 = 7;
+    uint32 user_data_32 = 8;
+    uint32 timeout = 9;
+    uint32 ledger = 10;
+    uint32 code = 11;
+    uint32 flags = 12;
+    uint64 timestamp = 13;
+}
+
+message ReadTransfersResponse {
+    repeated TransferRecord transfers = 1;
+    uint32 page = 2;
+    uint32 limit = 3;
+}

@@ -1,0 +1,84 @@
+name: Release Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }} ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            type: macos
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            type: macos
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            type: linux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            type: linux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            type: linux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            type: linux
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Configure Build (Fix linux-gnu image bug)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cat >> Cross.toml << 'EOF'
+          [target.x86_64-unknown-linux-gnu]
+          image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:latest"
+          EOF
+
+      - name: Build binary (macOS)
+        if: matrix.type == 'macos'
+        run: |
+          cargo build --bin tigerbeetle-manager-node --release --target ${{ matrix.target }}
+
+      - name: Build binary (Linux)
+        if: matrix.type == 'linux'
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+          cross build --bin tigerbeetle-manager-node --release --target ${{ matrix.target }}
+
+      - name: Collect binary artifacts
+        run: |
+          mkdir -p artifacts
+          BIN_PATH="target/${{ matrix.target }}/release/tigerbeetle-manager-node"
+          if [ -f "$BIN_PATH" ]; then
+            cp "$BIN_PATH" "artifacts/tigerbeetle-manager-node-${{ matrix.target }}"
+          fi
+
+      - name: Upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}

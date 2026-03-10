@@ -1,0 +1,41 @@
+[package]
+name = "tigerbeetle-manager"
+description = "Manage TigerBeetle processes with periodic backups to S3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Cron scheduling
+tokio-cron-scheduler = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+log = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Compression
+zstd = { workspace = true }
+
+# AWS S3
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+
+# Serialization (for ManagerState and BackupConfig)
+serde = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

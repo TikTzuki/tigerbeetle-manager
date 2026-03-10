@@ -1,0 +1,14 @@
+[package]
+name = "tigerbeetle-manager-reader"
+description = "Read account records directly from TigerBeetle binary data files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

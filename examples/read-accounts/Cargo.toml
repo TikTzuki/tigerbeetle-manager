@@ -1,0 +1,18 @@
+[package]
+name = "read-accounts"
+description = "Example: read all accounts from a TigerBeetle data file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "read-accounts"
+path = "src/main.rs"
+
+[dependencies]
+tb-reader = { workspace = true }
+
+[lints]
+workspace = true
