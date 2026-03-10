@@ -60,20 +60,20 @@ jobs:
       - name: Build binary (macOS)
         if: matrix.type == 'macos'
         run: |
-          cargo build --bin tigerbeetle-manager-node --release --target ${{ matrix.target }}
+          cargo build --bin tb-manager-node --release --target ${{ matrix.target }}
 
       - name: Build binary (Linux)
         if: matrix.type == 'linux'
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
-          cross build --bin tigerbeetle-manager-node --release --target ${{ matrix.target }}
+          cross build --bin tb-manager-node --release --target ${{ matrix.target }}
 
       - name: Collect binary artifacts
         run: |
           mkdir -p artifacts
-          BIN_PATH="target/${{ matrix.target }}/release/tigerbeetle-manager-node"
+          BIN_PATH="target/${{ matrix.target }}/release/tb-manager-node"
           if [ -f "$BIN_PATH" ]; then
-            cp "$BIN_PATH" "artifacts/tigerbeetle-manager-node-${{ matrix.target }}"
+            cp "$BIN_PATH" "artifacts/tb-manager-node-${{ matrix.target }}"
           fi
 
       - name: Upload binaries
