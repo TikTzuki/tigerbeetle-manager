@@ -1,12 +1,13 @@
 //! gRPC service implementation bridging proto types to the manager crate.
 
 use crate::proto::{
-    self, AccountRecord, BackupStatus, DataFileCapacity, FormatDataFileRequest,
-    FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse, GetStatusRequest,
-    GetStatusResponse, LogEntry, LogLevel, ModifyBackupConfigRequest, ModifyBackupConfigResponse,
-    ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest,
-    ReadTransfersResponse, StartBackupRequest, StartBackupResponse, StopBackupRequest,
-    StopBackupResponse, StreamLogsRequest, TransferRecord, TriggerBackupRequest,
+    self, AccountRecord, BackupStatus, DataFileCapacity, ExecuteMigrationRequest,
+    FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse,
+    GetStatusRequest, GetStatusResponse, LogEntry, LogLevel, MigrationProgress,
+    ModifyBackupConfigRequest, ModifyBackupConfigResponse, PlanMigrationRequest,
+    PlanMigrationResponse, ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse,
+    ReadTransfersRequest, ReadTransfersResponse, StartBackupRequest, StartBackupResponse,
+    StopBackupRequest, StopBackupResponse, StreamLogsRequest, TransferRecord, TriggerBackupRequest,
     TriggerBackupResponse, manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
@@ -695,6 +696,168 @@ impl ManagerNode for ManagerNodeService {
                 data_file_path: String::new(),
             }))
         }
+    }
+
+    async fn plan_migration(
+        &self,
+        _request: Request<PlanMigrationRequest>,
+    ) -> Result<Response<PlanMigrationResponse>, Status> {
+        let data_file = self.state.manager_state.read().await.backup_file.clone();
+        info!("PlanMigration: reading accounts from {data_file}");
+
+        let result =
+            tokio::task::spawn_blocking(move || -> Result<PlanMigrationResponse, String> {
+                let mut reader =
+                    DataFileReader::open(&data_file).map_err(|e| format!("open data file: {e}"))?;
+
+                // Collect all LSM accounts.
+                let accounts: Vec<tb_reader::Account> = match reader.iter_accounts() {
+                    Ok(iter) => iter
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| format!("read accounts: {e}"))?,
+                    Err(tb_reader::ReaderError::NotCheckpointed { .. }) => vec![],
+                    Err(e) => return Err(format!("iter accounts: {e}")),
+                };
+
+                let total_accounts = accounts.len() as u64;
+
+                // Count accounts with non-zero pending balances.
+                let pending = accounts
+                    .iter()
+                    .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
+                    .count() as u64;
+
+                // Count distinct ledgers.
+                let ledgers: std::collections::HashSet<u32> =
+                    accounts.iter().map(|a| a.ledger).collect();
+                let ledger_count = ledgers.len() as u32;
+
+                // Build plan to get synthetic transfer count.
+                let plan = tb_compressor::BalancePlan::build(accounts);
+                let synthetic_transfers = plan.total_transfers() as u64;
+
+                Ok(PlanMigrationResponse {
+                    accounts: total_accounts,
+                    pending_transfers: pending,
+                    synthetic_transfers,
+                    safe: pending == 0,
+                    ledgers: ledger_count,
+                })
+            })
+            .await
+            .map_err(|e| Status::internal(format!("task join: {e}")))?
+            .map_err(|e| {
+                warn!("PlanMigration error: {e}");
+                Status::internal(e)
+            })?;
+
+        Ok(Response::new(result))
+    }
+
+    type ExecuteMigrationStream =
+        Pin<Box<dyn Stream<Item = Result<MigrationProgress, Status>> + Send + 'static>>;
+
+    async fn execute_migration(
+        &self,
+        request: Request<ExecuteMigrationRequest>,
+    ) -> Result<Response<Self::ExecuteMigrationStream>, Status> {
+        let req = request.into_inner();
+
+        if req.new_addresses.is_empty() {
+            return Err(Status::invalid_argument("new_addresses must not be empty"));
+        }
+
+        let data_file = self.state.manager_state.read().await.backup_file.clone();
+        info!(
+            "ExecuteMigration: cluster_id={} addresses={} source={}",
+            req.new_cluster_id, req.new_addresses, data_file
+        );
+
+        // Read all accounts from data file (blocking).
+        let accounts = tokio::task::spawn_blocking({
+            let df = data_file.clone();
+            move || -> Result<Vec<tb_reader::Account>, String> {
+                let mut reader =
+                    DataFileReader::open(&df).map_err(|e| format!("open data file: {e}"))?;
+                match reader.iter_accounts() {
+                    Ok(iter) => iter
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| format!("read accounts: {e}")),
+                    Err(tb_reader::ReaderError::NotCheckpointed { .. }) => Ok(vec![]),
+                    Err(e) => Err(format!("iter accounts: {e}")),
+                }
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(format!("task join: {e}")))?
+        .map_err(|e| Status::internal(e))?;
+
+        // Safety check: refuse if any account has pending balances.
+        let pending_count = accounts
+            .iter()
+            .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
+            .count();
+        if pending_count > 0 {
+            return Err(Status::failed_precondition(format!(
+                "{pending_count} account(s) have non-zero pending balances. \
+                 Void all pending transfers before migration."
+            )));
+        }
+
+        // Build the balance plan.
+        let plan = tb_compressor::BalancePlan::build(accounts);
+        info!(
+            "ExecuteMigration plan: {} genesis + {} regular accounts, {} transfers",
+            plan.genesis_accounts.len(),
+            plan.regular_accounts.len(),
+            plan.total_transfers(),
+        );
+
+        let new_cluster_id = req.new_cluster_id as u128;
+        let new_addresses = req.new_addresses.clone();
+
+        // Create progress channel.
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
+
+        // Spawn the import task.
+        tokio::spawn(async move {
+            let importer =
+                match tb_compressor::Importer::connect(new_cluster_id, &new_addresses).await {
+                    Ok(imp) => imp,
+                    Err(e) => {
+                        tracing::error!("ExecuteMigration: failed to connect to new cluster: {e}");
+                        return;
+                    }
+                };
+
+            if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
+                tracing::error!("ExecuteMigration: import failed: {e}");
+            }
+        });
+
+        // Stream progress back to the client.
+        let stream = async_stream::stream! {
+            while let Some(p) = progress_rx.recv().await {
+                yield Ok(MigrationProgress {
+                    phase: p.phase,
+                    imported: p.imported,
+                    total: p.total,
+                    done: false,
+                    error: String::new(),
+                });
+            }
+            // Channel closed — import is done (or errored).
+            yield Ok(MigrationProgress {
+                phase: "done".into(),
+                imported: 0,
+                total: 0,
+                done: true,
+                error: String::new(),
+            });
+        };
+
+        Ok(Response::new(Box::pin(stream)))
     }
 }
 

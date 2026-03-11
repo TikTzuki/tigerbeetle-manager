@@ -14,7 +14,7 @@
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // 1. Read accounts from old file.
 //! let mut reader = DataFileReader::open("old.tigerbeetle")?;
-//! let accounts = reader.read_accounts()?;
+//! let accounts = reader.read_lsm_accounts(0, 100_000)?;
 //!
 //! // 2. Build a compression plan.
 //! let plan = BalancePlan::build(accounts);
@@ -33,5 +33,5 @@ mod importer;
 mod plan;
 
 pub use error::{CompressorError, Result};
-pub use importer::Importer;
+pub use importer::{ImportProgress, Importer};
 pub use plan::{AccountGroup, BalancePlan, SyntheticTransfer};

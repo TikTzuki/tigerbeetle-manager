@@ -11,6 +11,7 @@ license.workspace = true
 tb-reader = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 # TigerBeetle client
 tigerbeetle-unofficial = "0.14.23+0.16.74"

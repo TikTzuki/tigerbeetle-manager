@@ -49,6 +49,16 @@ service ManagerNode {
     // The TigerBeetle process MUST be stopped before calling this.
     // Runs: tigerbeetle format --cluster=N --replica=N --replica-count=N [--size=S] <path>
     rpc FormatDataFile (FormatDataFileRequest) returns (FormatDataFileResponse);
+
+    // Pre-flight migration check — read-only, no side effects.
+    // Reads the data file to count accounts, check pending balances, and
+    // estimate synthetic transfer count.
+    rpc PlanMigration (PlanMigrationRequest) returns (PlanMigrationResponse);
+
+    // Execute migration: read old data file, import into new cluster.
+    // Streams progress updates back to the caller.
+    // The TigerBeetle process MUST be stopped before calling this (reads old data file).
+    rpc ExecuteMigration (ExecuteMigrationRequest) returns (stream MigrationProgress);
 }
 
 // --- Status ---
@@ -275,4 +285,41 @@ message FormatDataFileResponse {
     string message = 2;
     // Absolute path of the formatted data file.
     string data_file_path = 3;
+}
+
+// --- Migration ---
+
+message PlanMigrationRequest {}
+
+message PlanMigrationResponse {
+    // Number of accounts found in the data file.
+    uint64 accounts = 1;
+    // Number of accounts with non-zero debits_pending or credits_pending.
+    uint64 pending_transfers = 2;
+    // Number of synthetic transfers that will be generated (≤ 2 × accounts).
+    uint64 synthetic_transfers = 3;
+    // True if pending_transfers == 0 and migration is safe to proceed.
+    bool safe = 4;
+    // Number of distinct ledgers found.
+    uint32 ledgers = 5;
+}
+
+message ExecuteMigrationRequest {
+    // Cluster ID of the NEW cluster to import into.
+    uint64 new_cluster_id = 1;
+    // Comma-separated addresses of the new cluster (e.g., "h1:3000,h2:3000,...").
+    string new_addresses = 2;
+}
+
+message MigrationProgress {
+    // Current phase: "genesis_accounts", "accounts", or "transfers".
+    string phase = 1;
+    // Records imported so far in current phase.
+    uint64 imported = 2;
+    // Total records to import in current phase.
+    uint64 total = 3;
+    // True when migration is fully complete.
+    bool done = 4;
+    // Error message (non-empty only on failure).
+    string error = 5;
 }

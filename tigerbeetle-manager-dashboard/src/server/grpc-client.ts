@@ -339,3 +339,72 @@ export async function readNodeWalTransfers(
         client.close();
     }
 }
+
+// --- Migration ---
+
+export interface PlanMigrationResponse {
+    accounts: string;
+    pending_transfers: string;
+    synthetic_transfers: string;
+    safe: boolean;
+    ledgers: number;
+}
+
+export async function planMigration(
+    host: string,
+    port: number
+): Promise<PlanMigrationResponse> {
+    const client = createClient(`${host}:${port}`);
+    try {
+        return await promisify<PlanMigrationResponse>(client, "PlanMigration", {});
+    } finally {
+        client.close();
+    }
+}
+
+export interface MigrationProgress {
+    phase: string;
+    imported: string;
+    total: string;
+    done: boolean;
+    error: string;
+}
+
+export interface ExecuteMigrationOptions {
+    host: string;
+    port: number;
+    newClusterId: number;
+    newAddresses: string;
+    onProgress: (progress: MigrationProgress) => void;
+    onError?: (err: Error) => void;
+    onEnd?: () => void;
+}
+
+export function executeMigration(options: ExecuteMigrationOptions): () => void {
+    const client = createClient(`${options.host}:${options.port}`);
+    const stream = client.ExecuteMigration({
+        new_cluster_id: options.newClusterId,
+        new_addresses: options.newAddresses,
+    });
+
+    stream.on("data", (progress: MigrationProgress) => {
+        options.onProgress(progress);
+    });
+
+    stream.on("error", (err: any) => {
+        if (options.onError) {
+            options.onError(err);
+        }
+    });
+
+    stream.on("end", () => {
+        if (options.onEnd) {
+            options.onEnd();
+        }
+    });
+
+    return () => {
+        stream.cancel();
+        client.close();
+    };
+}

@@ -6,6 +6,7 @@ import {
     getNodeBackupConfig,
     getNodeStatus,
     modifyNodeBackupConfig,
+    planMigration,
     readNodeAccounts,
     readNodeLsmAccounts,
     readNodeLsmTransfers,
@@ -275,5 +276,17 @@ export const managerRouter = router({
             const node = nodes.find((n) => n.id === input.nodeId);
             if (!node) throw new Error(`Node ${input.nodeId} not found`);
             return readNodeWalTransfers(node.host, node.port, input.page, input.limit);
+        }),
+
+    // --- Migration ---
+
+    // Pre-flight migration check on a specific node (read-only).
+    planMigration: protectedProcedure
+        .input(z.object({nodeId: z.string()}))
+        .query(async ({input}) => {
+            const nodes = getNodeConfigs();
+            const node = nodes.find((n) => n.id === input.nodeId);
+            if (!node) throw new Error(`Node ${input.nodeId} not found`);
+            return planMigration(node.host, node.port);
         }),
 });

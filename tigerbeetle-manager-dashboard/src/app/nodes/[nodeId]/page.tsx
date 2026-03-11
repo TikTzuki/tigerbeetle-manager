@@ -853,10 +853,274 @@ function StatCell({label, value, mono, className}: {
 }
 
 // ---------------------------------------------------------------------------
+// Migration panel
+// ---------------------------------------------------------------------------
+
+interface MigrationProgressEvent {
+    phase: string;
+    imported: string;
+    total: string;
+    done: boolean;
+    error: string;
+}
+
+function MigratePanel({nodeId}: { nodeId: string }) {
+    const planQuery = trpc.manager.planMigration.useQuery(
+        {nodeId},
+        {enabled: false} // manual trigger
+    );
+    const [newClusterId, setNewClusterId] = useState("");
+    const [newAddresses, setNewAddresses] = useState("");
+    const [migrating, setMigrating] = useState(false);
+    const [progress, setProgress] = useState<MigrationProgressEvent[]>([]);
+    const [migrationDone, setMigrationDone] = useState(false);
+    const [migrationError, setMigrationError] = useState<string | null>(null);
+
+    const runPreflight = () => {
+        planQuery.refetch();
+    };
+
+    const startMigration = async () => {
+        const cid = parseInt(newClusterId, 10);
+        if (isNaN(cid) || !newAddresses.trim()) return;
+
+        setMigrating(true);
+        setProgress([]);
+        setMigrationDone(false);
+        setMigrationError(null);
+
+        try {
+            const resp = await fetch("/api/migration/execute", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                    nodeId,
+                    newClusterId: cid,
+                    newAddresses: newAddresses.trim(),
+                }),
+            });
+
+            if (!resp.ok) {
+                setMigrationError(`HTTP ${resp.status}: ${await resp.text()}`);
+                setMigrating(false);
+                return;
+            }
+
+            const reader = resp.body?.getReader();
+            const decoder = new TextDecoder();
+            if (!reader) {
+                setMigrationError("No response body");
+                setMigrating(false);
+                return;
+            }
+
+            let buffer = "";
+            while (true) {
+                const {value, done} = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, {stream: true});
+
+                const lines = buffer.split("\n\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                    const match = line.match(/^data: (.+)$/);
+                    if (match) {
+                        try {
+                            const evt = JSON.parse(match[1]) as MigrationProgressEvent;
+                            setProgress((prev) => [...prev, evt]);
+                            if (evt.done) setMigrationDone(true);
+                            if (evt.error) setMigrationError(evt.error);
+                        } catch { /* ignore parse errors */
+                        }
+                    }
+                }
+            }
+        } catch (e: any) {
+            setMigrationError(e.message || "Unknown error");
+        } finally {
+            setMigrating(false);
+        }
+    };
+
+    const plan = planQuery.data;
+    const latestProgress = progress.length > 0 ? progress[progress.length - 1] : null;
+
+    return (
+        <div className="space-y-6">
+            {/* Step 1: Pre-flight check */}
+            <div className="rounded-lg border border-gray-200 bg-white p-6">
+                <h3 className="mb-4 text-sm font-semibold text-gray-900">Step 1 — Pre-flight Check</h3>
+                <p className="mb-4 text-xs text-gray-500">
+                    Reads the data file to count accounts, check pending balances, and estimate synthetic transfers.
+                    This is read-only and has no side effects.
+                </p>
+                <button
+                    onClick={runPreflight}
+                    disabled={planQuery.isFetching}
+                    className="rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-50"
+                >
+                    {planQuery.isFetching ? "Checking..." : "Run Pre-flight Check"}
+                </button>
+
+                {planQuery.isError && (
+                    <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                        {planQuery.error.message}
+                    </div>
+                )}
+
+                {plan && (
+                    <div className="mt-4 space-y-3">
+                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                                <div className="text-xs text-gray-500">Accounts</div>
+                                <div className="text-lg font-bold tabular-nums">
+                                    {parseInt(plan.accounts, 10).toLocaleString()}
+                                </div>
+                            </div>
+                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                                <div className="text-xs text-gray-500">Ledgers</div>
+                                <div className="text-lg font-bold tabular-nums">{plan.ledgers}</div>
+                            </div>
+                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                                <div className="text-xs text-gray-500">Synthetic Transfers</div>
+                                <div className="text-lg font-bold tabular-nums">
+                                    {parseInt(plan.synthetic_transfers, 10).toLocaleString()}
+                                </div>
+                            </div>
+                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                                <div className="text-xs text-gray-500">Pending</div>
+                                <div
+                                    className={`text-lg font-bold tabular-nums ${parseInt(plan.pending_transfers, 10) > 0 ? "text-red-600" : "text-green-600"}`}>
+                                    {parseInt(plan.pending_transfers, 10).toLocaleString()}
+                                </div>
+                            </div>
+                        </div>
+                        {plan.safe ? (
+                            <div className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">
+                                Migration is safe to proceed. No pending transfers found.
+                            </div>
+                        ) : (
+                            <div className="rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                                Migration is NOT safe. {plan.pending_transfers} account(s) have pending balances.
+                                Void all pending transfers before proceeding.
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {/* Step 2: Execute migration */}
+            <div className="rounded-lg border border-gray-200 bg-white p-6">
+                <h3 className="mb-4 text-sm font-semibold text-gray-900">Step 2 — Execute Migration</h3>
+                <p className="mb-4 text-xs text-gray-500">
+                    Reads old data file, connects to the new cluster, and imports all accounts and synthetic transfers.
+                    The new cluster must be formatted and running before executing.
+                </p>
+
+                <div className="mb-4 grid gap-3 sm:grid-cols-2">
+                    <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-700">New Cluster ID</label>
+                        <input
+                            type="number"
+                            value={newClusterId}
+                            onChange={(e) => setNewClusterId(e.target.value)}
+                            placeholder="0"
+                            disabled={migrating}
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                        />
+                    </div>
+                    <div>
+                        <label className="mb-1 block text-xs font-medium text-gray-700">New Cluster Addresses</label>
+                        <input
+                            type="text"
+                            value={newAddresses}
+                            onChange={(e) => setNewAddresses(e.target.value)}
+                            placeholder="h1:3000,h2:3000,h3:3000,h4:3000,h5:3000,h6:3000"
+                            disabled={migrating}
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                        />
+                    </div>
+                </div>
+
+                <button
+                    onClick={startMigration}
+                    disabled={migrating || !newClusterId || !newAddresses.trim() || (plan != null && !plan.safe)}
+                    className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                    {migrating ? "Migrating..." : "Start Migration"}
+                </button>
+
+                {plan != null && !plan.safe && (
+                    <p className="mt-2 text-xs text-red-600">
+                        Cannot start migration — pending transfers exist. Run pre-flight check after voiding them.
+                    </p>
+                )}
+
+                {/* Progress display */}
+                {(progress.length > 0 || migrating) && (
+                    <div className="mt-4 space-y-3">
+                        {latestProgress && !latestProgress.done && (
+                            <div>
+                                <div className="mb-1 flex justify-between text-xs">
+                                    <span className="font-medium text-gray-700">
+                                        Phase: {latestProgress.phase}
+                                    </span>
+                                    <span className="tabular-nums text-gray-500">
+                                        {parseInt(latestProgress.imported, 10).toLocaleString()} / {parseInt(latestProgress.total, 10).toLocaleString()}
+                                    </span>
+                                </div>
+                                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-200">
+                                    <div
+                                        className="h-full rounded-full bg-blue-500 transition-all"
+                                        style={{
+                                            width: `${parseInt(latestProgress.total, 10) > 0
+                                                ? (parseInt(latestProgress.imported, 10) / parseInt(latestProgress.total, 10)) * 100
+                                                : 0}%`
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        {migrationDone && (
+                            <div className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">
+                                Migration completed successfully.
+                            </div>
+                        )}
+
+                        {migrationError && (
+                            <div className="rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                                Migration error: {migrationError}
+                            </div>
+                        )}
+
+                        {/* Progress log */}
+                        <details className="text-xs">
+                            <summary className="cursor-pointer text-gray-500 hover:text-gray-700">
+                                Progress log ({progress.length} events)
+                            </summary>
+                            <div
+                                className="mt-2 max-h-48 overflow-y-auto rounded border border-gray-200 bg-gray-50 p-2 font-mono">
+                                {progress.map((p, i) => (
+                                    <div key={i} className="text-gray-600">
+                                        [{p.phase}] {p.imported}/{p.total}{p.done ? " DONE" : ""}{p.error ? ` ERROR: ${p.error}` : ""}
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Node detail page
 // ---------------------------------------------------------------------------
 
-type PageTab = "overview" | "backup" | "accounts" | "transfers" | "logs";
+type PageTab = "overview" | "backup" | "accounts" | "transfers" | "logs" | "migrate";
 
 export default function NodeDetailPage() {
     const params = useParams();
@@ -900,6 +1164,7 @@ export default function NodeDetailPage() {
         {id: "accounts", label: "Accounts"},
         {id: "transfers", label: "Transfers"},
         {id: "logs", label: "Logs"},
+        {id: "migrate", label: "Migrate"},
     ];
 
     return (
@@ -1201,6 +1466,13 @@ export default function NodeDetailPage() {
                 {tab === "logs" && (
                     <Section title="Live Logs">
                         <LogStream nodeId={nodeId}/>
+                    </Section>
+                )}
+
+                {/* ── Migrate ──────────────────────────────────── */}
+                {tab === "migrate" && (
+                    <Section title="Cluster Migration">
+                        <MigratePanel nodeId={nodeId}/>
                     </Section>
                 )}
             </div>

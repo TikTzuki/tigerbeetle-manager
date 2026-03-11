@@ -2646,6 +2646,7 @@ dependencies = [
  "tigerbeetle-manager-reader",
  "tigerbeetle-unofficial",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2661,6 +2662,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tigerbeetle-manager",
+ "tigerbeetle-manager-compressor",
  "tigerbeetle-manager-reader",
  "tokio",
  "tokio-stream",
