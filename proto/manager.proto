@@ -44,6 +44,11 @@ service ManagerNode {
 
     // Read pre-checkpoint transfers from the WAL.
     rpc ReadWalTransfers (ReadTransfersRequest) returns (ReadTransfersResponse);
+
+    // Format a new TigerBeetle data file on this node.
+    // The TigerBeetle process MUST be stopped before calling this.
+    // Runs: tigerbeetle format --cluster=N --replica=N --replica-count=N [--size=S] <path>
+    rpc FormatDataFile (FormatDataFileRequest) returns (FormatDataFileResponse);
 }
 
 // --- Status ---
@@ -235,4 +240,28 @@ message ReadTransfersResponse {
     repeated TransferRecord transfers = 1;
     uint32 page = 2;
     uint32 limit = 3;
+}
+
+// --- Format ---
+
+message FormatDataFileRequest {
+    // TigerBeetle cluster ID.
+    uint64 cluster_id = 1;
+    // Replica index for this node (0-based, e.g., 0–5 for a 6-node cluster).
+    uint32 replica = 2;
+    // Total number of replicas in the cluster (e.g., 6).
+    uint32 replica_count = 3;
+    // Optional data file size understood by TigerBeetle (e.g., "1GiB", "128GiB").
+    // If empty, TigerBeetle uses its default size.
+    string size = 4;
+    // Path where the new data file will be written.
+    // If empty, uses the node's currently configured data file path.
+    string data_file_path = 5;
+}
+
+message FormatDataFileResponse {
+    bool success = 1;
+    string message = 2;
+    // Absolute path of the formatted data file.
+    string data_file_path = 3;
 }

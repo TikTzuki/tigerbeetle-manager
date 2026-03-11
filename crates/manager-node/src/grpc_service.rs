@@ -1,12 +1,13 @@
 //! gRPC service implementation bridging proto types to the manager crate.
 
 use crate::proto::{
-    self, AccountRecord, BackupStatus, GetBackupConfigRequest, GetBackupConfigResponse,
-    GetStatusRequest, GetStatusResponse, LogEntry, LogLevel, ModifyBackupConfigRequest,
-    ModifyBackupConfigResponse, ProcessState, ProcessStatus, ReadAccountsRequest,
-    ReadAccountsResponse, ReadTransfersRequest, ReadTransfersResponse, StartBackupRequest,
-    StartBackupResponse, StopBackupRequest, StopBackupResponse, StreamLogsRequest, TransferRecord,
-    TriggerBackupRequest, TriggerBackupResponse, manager_node_server::ManagerNode,
+    self, AccountRecord, BackupStatus, FormatDataFileRequest, FormatDataFileResponse,
+    GetBackupConfigRequest, GetBackupConfigResponse, GetStatusRequest, GetStatusResponse, LogEntry,
+    LogLevel, ModifyBackupConfigRequest, ModifyBackupConfigResponse, ProcessState, ProcessStatus,
+    ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest, ReadTransfersResponse,
+    StartBackupRequest, StartBackupResponse, StopBackupRequest, StopBackupResponse,
+    StreamLogsRequest, TransferRecord, TriggerBackupRequest, TriggerBackupResponse,
+    manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -584,6 +585,95 @@ impl ManagerNode for ManagerNodeService {
             page: req.page,
             limit: req.limit,
         }))
+    }
+
+    async fn format_data_file(
+        &self,
+        request: Request<FormatDataFileRequest>,
+    ) -> Result<Response<FormatDataFileResponse>, Status> {
+        let req = request.into_inner();
+
+        // Safety check: refuse if TigerBeetle is still running.
+        {
+            let ms = self.state.manager_state.read().await;
+            if ms.process_running {
+                return Ok(Response::new(FormatDataFileResponse {
+                    success: false,
+                    message: "TigerBeetle process is still running. \
+                              Stop the node before formatting a data file."
+                        .into(),
+                    data_file_path: String::new(),
+                }));
+            }
+        }
+
+        // Resolve target data file path: request field takes priority, then configured path.
+        let data_file_path = if !req.data_file_path.is_empty() {
+            req.data_file_path.clone()
+        } else {
+            self.state.manager_state.read().await.backup_file.clone()
+        };
+
+        if data_file_path.is_empty() {
+            return Ok(Response::new(FormatDataFileResponse {
+                success: false,
+                message: "No data file path provided and none is configured on this node.".into(),
+                data_file_path: String::new(),
+            }));
+        }
+
+        // Retrieve the TigerBeetle executable path from manager state.
+        let exe = self.state.manager_state.read().await.exe.clone();
+
+        // Build `tigerbeetle format` arguments.
+        let mut cmd_args: Vec<String> = vec![
+            "format".into(),
+            format!("--cluster={}", req.cluster_id),
+            format!("--replica={}", req.replica),
+            format!("--replica-count={}", req.replica_count),
+        ];
+        if !req.size.is_empty() {
+            cmd_args.push(format!("--size={}", req.size));
+        }
+        cmd_args.push(data_file_path.clone());
+
+        info!("FormatDataFile: {} {}", exe, cmd_args.join(" "));
+
+        let output = tokio::process::Command::new(&exe)
+            .args(&cmd_args)
+            .output()
+            .await
+            .map_err(|e| Status::internal(format!("failed to spawn tigerbeetle: {e}")))?;
+
+        if output.status.success() {
+            info!("FormatDataFile succeeded: {}", data_file_path);
+            Ok(Response::new(FormatDataFileResponse {
+                success: true,
+                message: format!(
+                    "Data file formatted successfully: cluster={} replica={}/{} path={}",
+                    req.cluster_id, req.replica, req.replica_count, data_file_path
+                ),
+                data_file_path,
+            }))
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let combined = format!("{}{}", stdout, stderr).trim().to_string();
+            warn!(
+                "FormatDataFile failed (exit {:?}): {}",
+                output.status.code(),
+                combined
+            );
+            Ok(Response::new(FormatDataFileResponse {
+                success: false,
+                message: format!(
+                    "tigerbeetle format failed (exit {:?}): {}",
+                    output.status.code(),
+                    combined
+                ),
+                data_file_path: String::new(),
+            }))
+        }
     }
 }
 
