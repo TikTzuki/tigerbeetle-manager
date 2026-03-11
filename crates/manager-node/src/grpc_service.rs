@@ -1,13 +1,13 @@
 //! gRPC service implementation bridging proto types to the manager crate.
 
 use crate::proto::{
-    self, AccountRecord, BackupStatus, FormatDataFileRequest, FormatDataFileResponse,
-    GetBackupConfigRequest, GetBackupConfigResponse, GetStatusRequest, GetStatusResponse, LogEntry,
-    LogLevel, ModifyBackupConfigRequest, ModifyBackupConfigResponse, ProcessState, ProcessStatus,
-    ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest, ReadTransfersResponse,
-    StartBackupRequest, StartBackupResponse, StopBackupRequest, StopBackupResponse,
-    StreamLogsRequest, TransferRecord, TriggerBackupRequest, TriggerBackupResponse,
-    manager_node_server::ManagerNode,
+    self, AccountRecord, BackupStatus, DataFileCapacity, FormatDataFileRequest,
+    FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse, GetStatusRequest,
+    GetStatusResponse, LogEntry, LogLevel, ModifyBackupConfigRequest, ModifyBackupConfigResponse,
+    ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest,
+    ReadTransfersResponse, StartBackupRequest, StartBackupResponse, StopBackupRequest,
+    StopBackupResponse, StreamLogsRequest, TransferRecord, TriggerBackupRequest,
+    TriggerBackupResponse, manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -90,6 +90,26 @@ impl ManagerNode for ManagerNodeService {
             .num_seconds()
             .max(0) as u64;
 
+        let data_file = ms.backup_file.clone();
+
+        // Read data file capacity stats (best-effort, non-fatal if it fails).
+        let capacity = {
+            let df = data_file.clone();
+            tokio::task::spawn_blocking(move || {
+                DataFileReader::open(&df)
+                    .and_then(|mut r| r.capacity_stats())
+                    .ok()
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|stats| DataFileCapacity {
+                data_file_size_bytes: stats.data_file_size_bytes,
+                grid_blocks_total: stats.grid_blocks_total,
+                grid_blocks_used: stats.grid_blocks_used,
+            })
+        };
+
         let response = GetStatusResponse {
             node_id: self.state.node_id.clone(),
             process: Some(ProcessStatus {
@@ -112,6 +132,7 @@ impl ManagerNode for ManagerNodeService {
                 last_error: ms.last_backup_error.clone().unwrap_or_default(),
             }),
             uptime_seconds: uptime,
+            capacity,
         };
 
         Ok(Response::new(response))

@@ -8,11 +8,26 @@ use std::path::Path;
 use crate::block::{BLOCK_TYPE_INDEX, BLOCK_TYPE_VALUE, BlockHeader, HEADER_SIZE, OFF_METADATA};
 use crate::error::ReaderError;
 use crate::layout::TBConfig;
-use crate::manifest::{collect_account_index_blocks, collect_transfer_index_blocks};
+use crate::manifest::{
+    collect_account_index_blocks, collect_transfer_index_blocks, count_live_index_blocks,
+};
 use crate::superblock::read_superblock;
 use crate::types::{Account, Transfer, read_u32, read_u64};
 
 const RECORD_SIZE: usize = 128;
+
+/// Data file capacity statistics.
+#[derive(Debug, Clone)]
+pub struct CapacityStats {
+    /// Total file size in bytes (= formatted capacity, since the file is pre-allocated).
+    pub data_file_size_bytes: u64,
+    /// Total number of grid blocks that fit in the data file.
+    pub grid_blocks_total: u64,
+    /// Number of grid blocks occupied by live LSM tables (index blocks only).
+    /// This is a lower bound — it does not count value blocks, manifest blocks,
+    /// or free-list blocks.
+    pub grid_blocks_used: u64,
+}
 
 // WAL message header field offsets (within a 256-byte header slot).
 const WAL_HDR_SIZE: usize = 96; // u32: total message size (header + body)
@@ -112,6 +127,30 @@ impl DataFileReader {
         let file = File::open(path.as_ref())
             .map_err(|e| ReaderError::Io(format!("cannot open {:?}: {e}", path.as_ref())))?;
         Ok(DataFileReader { file, config })
+    }
+
+    /// Return capacity statistics for this data file.
+    ///
+    /// Reports the total file size, total grid block slots, and the number of
+    /// grid blocks occupied by live LSM tables.
+    pub fn capacity_stats(&mut self) -> Result<CapacityStats, ReaderError> {
+        let file_size = self
+            .file
+            .metadata()
+            .map_err(|e| ReaderError::Io(format!("metadata: {e}")))?
+            .len();
+
+        let grid_bytes = file_size.saturating_sub(self.config.grid_zone_start);
+        let grid_blocks_total = grid_bytes / self.config.block_size;
+
+        let sb = read_superblock(&mut self.file, &self.config)?;
+        let grid_blocks_used = count_live_index_blocks(&mut self.file, &self.config, &sb)?;
+
+        Ok(CapacityStats {
+            data_file_size_bytes: file_size,
+            grid_blocks_total,
+            grid_blocks_used,
+        })
     }
 
     // -----------------------------------------------------------------------

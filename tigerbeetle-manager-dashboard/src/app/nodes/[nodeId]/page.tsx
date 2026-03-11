@@ -28,6 +28,13 @@ function truncId(id: string, len = 20): string {
     return id.length > len ? id.slice(0, len) + "…" : id;
 }
 
+function formatBytes(bytes: number): string {
+    if (bytes === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
 function CopyButton({value}: { value: string }) {
     const [copied, setCopied] = useState(false);
     return (
@@ -885,6 +892,7 @@ export default function NodeDetailPage() {
     const status = node?.status;
     const process = status?.process;
     const backup = status?.backup;
+    const capacity = status?.capacity;
 
     const TABS: { id: PageTab; label: string }[] = [
         {id: "overview", label: "Overview"},
@@ -986,6 +994,47 @@ export default function NodeDetailPage() {
                                 </div>
                             </Section>
                         )}
+
+                        {/* Data file capacity */}
+                        {capacity && (() => {
+                            const total = parseInt(capacity.grid_blocks_total, 10);
+                            const used = parseInt(capacity.grid_blocks_used, 10);
+                            const fileSize = parseInt(capacity.data_file_size_bytes, 10);
+                            const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+                            const color =
+                                pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-blue-500";
+                            const colorText =
+                                pct >= 90 ? "text-red-700" : pct >= 70 ? "text-amber-700" : "text-blue-700";
+                            return (
+                                <Section title="Data File Capacity">
+                                    <div className="rounded-lg border border-gray-200 bg-white p-4">
+                                        <div className="mb-3 flex items-end justify-between">
+                                            <div>
+                                                <span
+                                                    className={`text-2xl font-bold tabular-nums ${colorText}`}>{pct.toFixed(1)}%</span>
+                                                <span className="ml-2 text-sm text-gray-500">used</span>
+                                            </div>
+                                            <span
+                                                className="text-sm text-gray-500 font-mono">{formatBytes(fileSize)}</span>
+                                        </div>
+                                        <div className="h-3 w-full overflow-hidden rounded-full bg-gray-200">
+                                            <div
+                                                className={`h-full rounded-full transition-all ${color}`}
+                                                style={{width: `${pct}%`}}
+                                            />
+                                        </div>
+                                        <div className="mt-2 flex justify-between text-xs text-gray-500">
+                                            <span>{used.toLocaleString()} / {total.toLocaleString()} grid blocks</span>
+                                            {pct >= 80 && (
+                                                <span className="font-medium text-amber-600">
+                                                    Consider migration
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </Section>
+                            );
+                        })()}
 
                         {/* Process details */}
                         {process && (

@@ -13,6 +13,40 @@ function formatUptime(seconds: string | number): string {
     return `${h}h ${m}m`;
 }
 
+function formatBytes(bytes: number): string {
+    if (bytes === 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+function CapacityBar({capacity}: {
+    capacity: { data_file_size_bytes: string; grid_blocks_total: string; grid_blocks_used: string } | null
+}) {
+    if (!capacity) return null;
+    const total = parseInt(capacity.grid_blocks_total, 10);
+    const used = parseInt(capacity.grid_blocks_used, 10);
+    if (total === 0) return null;
+    const pct = Math.min(100, (used / total) * 100);
+    const fileSize = parseInt(capacity.data_file_size_bytes, 10);
+    const color =
+        pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-blue-500";
+    return (
+        <div className="mt-1.5">
+            <div className="mb-0.5 flex justify-between text-xs">
+                <span className="text-gray-500">Capacity</span>
+                <span className="font-mono tabular-nums">{pct.toFixed(1)}% · {formatBytes(fileSize)}</span>
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
+                <div
+                    className={`h-full rounded-full transition-all ${color}`}
+                    style={{width: `${pct}%`}}
+                />
+            </div>
+        </div>
+    );
+}
+
 function ProcessStateBadge({state}: { state: string }) {
     const colors: Record<string, string> = {
         PROCESS_STATE_RUNNING: "bg-green-100 text-green-800",
@@ -173,6 +207,7 @@ export default function Home() {
                                             {node.status.backup?.enabled ? `On · ${node.status.backup.cron_schedule}` : "Off"}
                                         </span>
                                     </div>
+                                    <CapacityBar capacity={node.status.capacity}/>
                                     <p className="mt-2 text-center text-gray-400">Click to open →</p>
                                 </div>
                             )}

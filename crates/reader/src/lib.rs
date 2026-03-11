@@ -40,5 +40,7 @@ mod types;
 
 pub use error::ReaderError;
 pub use layout::TBConfig;
-pub use reader::{AccountIter, DataFileReader, TransferIter, WalAccountIter, WalTransferIter};
+pub use reader::{
+    AccountIter, CapacityStats, DataFileReader, TransferIter, WalAccountIter, WalTransferIter,
+};
 pub use types::{Account, AccountFlags, Transfer, TransferFlags};

@@ -36,11 +36,18 @@ export interface BackupStatus {
     last_error: string;
 }
 
+export interface DataFileCapacity {
+    data_file_size_bytes: string;
+    grid_blocks_total: string;
+    grid_blocks_used: string;
+}
+
 export interface NodeStatus {
     node_id: string;
     process: ProcessStatus;
     backup: BackupStatus;
     uptime_seconds: string;
+    capacity: DataFileCapacity | null;
 }
 
 export interface GrpcResponse {

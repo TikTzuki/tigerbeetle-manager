@@ -64,6 +64,8 @@ message GetStatusResponse {
     BackupStatus backup = 3;
     // Node uptime in seconds.
     uint64 uptime_seconds = 4;
+    // Data file capacity information.
+    DataFileCapacity capacity = 5;
 }
 
 enum ProcessState {
@@ -99,6 +101,15 @@ message BackupStatus {
     string last_backup_at = 4;
     // Last backup error message (empty if last succeeded or never ran).
     string last_error = 5;
+}
+
+message DataFileCapacity {
+    // Total data file size in bytes (= formatted capacity, since the file is pre-allocated).
+    uint64 data_file_size_bytes = 1;
+    // Total number of grid blocks that fit in the data file.
+    uint64 grid_blocks_total = 2;
+    // Number of grid blocks occupied by live LSM tables (lower bound).
+    uint64 grid_blocks_used = 3;
 }
 
 // --- Backup Control ---

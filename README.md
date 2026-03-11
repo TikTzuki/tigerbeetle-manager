@@ -205,9 +205,9 @@ cargo run --release -- \
 
 cargo run --bin tb-manager-node -- \
 --backup-config-file ./backup_config.toml \
---bucket platform-dev-tigerbeetle-backup \
 --exe tigerbeetle \
--- start --addresses=3000 ./data/0_0.tigerbeetle
+-- start --addresses=3000 \
+/Users/tiktuzki/Desktop/repos/ewallet/core-ledger-ms/compose/data/tigerbeetle-data/0_0.tigerbeetle
 
 Forest = ForestType(
 Storage, .{                                                                                                                                                                                                         
