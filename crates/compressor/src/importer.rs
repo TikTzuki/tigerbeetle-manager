@@ -7,6 +7,8 @@ use tigerbeetle_unofficial::{
     Account, Client, Transfer, account::Flags as AccountFlags, transfer::Flags as TransferFlags,
 };
 use tokio::sync::mpsc;
+use tracing::field::debug;
+use tracing::{debug, info};
 
 /// Maximum batch size for account/transfer creation.
 ///
@@ -96,6 +98,7 @@ impl Importer {
         // Phase 1: genesis accounts.
         let genesis_total = plan.genesis_accounts.len() as u64;
         let mut genesis_imported = 0u64;
+        debug!("Starting import of genesis accounts: total={genesis_total}");
         for chunk in plan.genesis_accounts.chunks(BATCH_SIZE) {
             let tb_accounts: Vec<Account> =
                 chunk.iter().map(|acc| convert_account(acc, true)).collect();
@@ -113,6 +116,10 @@ impl Importer {
                 .await;
         }
 
+        debug!(
+            "Finished importing genesis accounts, starting regular accounts: total={}",
+            plan.regular_accounts.len()
+        );
         // Phase 2: regular accounts.
         let accounts_total = plan.regular_accounts.len() as u64;
         let mut accounts_imported = 0u64;
@@ -134,6 +141,10 @@ impl Importer {
         }
 
         // Phase 3: synthetic transfers.
+        debug!(
+            "Finished importing accounts, starting synthetic transfers: total={}",
+            plan.synthetic_transfers.len()
+        );
         let transfers_total = plan.synthetic_transfers.len() as u64;
         let mut transfers_imported = 0u64;
         for chunk in plan.synthetic_transfers.chunks(BATCH_SIZE) {
@@ -216,6 +227,10 @@ fn convert_account(acc: &ReaderAccount, imported: bool) -> Account {
         flags |= AccountFlags::CLOSED;
     }
 
+    info!(
+        "Converting account {} with flags {:?} {:?} (imported={})",
+        acc.id, acc.code, flags, imported
+    );
     let mut account = Account::new(acc.id, acc.ledger, acc.code)
         .with_flags(flags)
         .with_user_data_128(acc.user_data_128)

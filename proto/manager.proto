@@ -59,6 +59,14 @@ service ManagerNode {
     // Streams progress updates back to the caller.
     // The TigerBeetle process MUST be stopped before calling this (reads old data file).
     rpc ExecuteMigration (ExecuteMigrationRequest) returns (stream MigrationProgress);
+
+    // Browse cached migration accounts with filtering and pagination.
+    // Requires a prior PlanMigration call to populate the cache.
+    rpc GetMigrationAccounts (GetMigrationAccountsRequest) returns (GetMigrationAccountsResponse);
+
+    // Browse cached migration synthetic transfers with pagination.
+    // Requires a prior PlanMigration call to populate the cache.
+    rpc GetMigrationSyntheticTransfers (GetMigrationSyntheticTransfersRequest) returns (GetMigrationSyntheticTransfersResponse);
 }
 
 // --- Status ---
@@ -302,6 +310,65 @@ message PlanMigrationResponse {
     bool safe = 4;
     // Number of distinct ledgers found.
     uint32 ledgers = 5;
+    // Per-ledger breakdown (account count and aggregate balances).
+    repeated LedgerSummary ledger_summaries = 6;
+    // Accounts with non-zero pending balances (should be empty for safe migrations).
+    repeated AccountRecord pending_accounts = 7;
+}
+
+message LedgerSummary {
+    uint32 ledger = 1;
+    uint64 account_count = 2;
+    // u128 encoded as decimal string.
+    string total_debits_posted = 3;
+    // u128 encoded as decimal string.
+    string total_credits_posted = 4;
+}
+
+message SyntheticTransferRecord {
+    string id = 1;
+    string debit_account_id = 2;
+    string credit_account_id = 3;
+    string amount = 4;
+    uint32 ledger = 5;
+    uint32 code = 6;
+    uint64 timestamp = 7;
+}
+
+message MigrationAccountFilter {
+    optional string id = 1;           // exact match, u128 as string
+    optional uint32 ledger = 2;
+    optional uint32 code = 3;
+    optional uint32 flags = 4;
+    optional uint32 user_data_32 = 5;
+    optional uint64 user_data_64 = 6;
+    optional string user_data_128 = 7; // u128 as string
+}
+
+message GetMigrationAccountsRequest {
+    uint32 page = 1;
+    uint32 limit = 2;    // max 500
+    MigrationAccountFilter filter = 3;
+}
+
+message GetMigrationAccountsResponse {
+    repeated AccountRecord accounts = 1;
+    uint32 page = 2;
+    uint32 limit = 3;
+    uint64 total_count = 4;  // total matching records
+}
+
+message GetMigrationSyntheticTransfersRequest {
+    uint32 page = 1;
+    uint32 limit = 2;    // max 500
+    optional uint32 ledger = 3;  // optional ledger filter
+}
+
+message GetMigrationSyntheticTransfersResponse {
+    repeated SyntheticTransferRecord transfers = 1;
+    uint32 page = 2;
+    uint32 limit = 3;
+    uint64 total_count = 4;
 }
 
 message ExecuteMigrationRequest {

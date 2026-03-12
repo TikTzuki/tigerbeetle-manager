@@ -3,12 +3,14 @@
 use crate::proto::{
     self, AccountRecord, BackupStatus, DataFileCapacity, ExecuteMigrationRequest,
     FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse,
-    GetStatusRequest, GetStatusResponse, LogEntry, LogLevel, MigrationProgress,
+    GetMigrationAccountsRequest, GetMigrationAccountsResponse,
+    GetMigrationSyntheticTransfersRequest, GetMigrationSyntheticTransfersResponse,
+    GetStatusRequest, GetStatusResponse, LedgerSummary, LogEntry, LogLevel, MigrationProgress,
     ModifyBackupConfigRequest, ModifyBackupConfigResponse, PlanMigrationRequest,
     PlanMigrationResponse, ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse,
     ReadTransfersRequest, ReadTransfersResponse, StartBackupRequest, StartBackupResponse,
-    StopBackupRequest, StopBackupResponse, StreamLogsRequest, TransferRecord, TriggerBackupRequest,
-    TriggerBackupResponse, manager_node_server::ManagerNode,
+    StopBackupRequest, StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord,
+    TransferRecord, TriggerBackupRequest, TriggerBackupResponse, manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -19,6 +21,15 @@ use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, warn};
+
+/// Cached migration plan for paginated drill-down queries.
+#[derive(Debug, Clone)]
+pub struct CachedMigrationPlan {
+    /// All accounts from the data file.
+    pub accounts: Vec<tb_reader::Account>,
+    /// Synthetic transfers computed by BalancePlan.
+    pub synthetic_transfers: Vec<tb_compressor::SyntheticTransfer>,
+}
 
 /// Shared state for the gRPC service.
 #[derive(Debug, Clone)]
@@ -37,6 +48,8 @@ pub struct NodeState {
     pub backup_lock: Arc<Mutex<()>>,
     /// Live cron-schedule sender — drives the ProcessManager scheduler.
     pub cron_schedule_tx: Arc<watch::Sender<Option<String>>>,
+    /// Cached migration plan populated by PlanMigration for drill-down RPCs.
+    pub cached_migration: Arc<RwLock<Option<CachedMigrationPlan>>>,
 }
 
 /// gRPC service for a single manager node.
@@ -705,19 +718,10 @@ impl ManagerNode for ManagerNodeService {
         let data_file = self.state.manager_state.read().await.backup_file.clone();
         info!("PlanMigration: reading accounts from {data_file}");
 
-        let result =
-            tokio::task::spawn_blocking(move || -> Result<PlanMigrationResponse, String> {
-                let mut reader =
-                    DataFileReader::open(&data_file).map_err(|e| format!("open data file: {e}"))?;
-
-                // Collect all LSM accounts.
-                let accounts: Vec<tb_reader::Account> = match reader.iter_accounts() {
-                    Ok(iter) => iter
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| format!("read accounts: {e}"))?,
-                    Err(tb_reader::ReaderError::NotCheckpointed { .. }) => vec![],
-                    Err(e) => return Err(format!("iter accounts: {e}")),
-                };
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<(PlanMigrationResponse, CachedMigrationPlan), String> {
+                // Read all accounts (LSM + WAL merged).
+                let accounts = read_all_accounts(&data_file)?;
 
                 let total_accounts = accounts.len() as u64;
 
@@ -727,31 +731,201 @@ impl ManagerNode for ManagerNodeService {
                     .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
                     .count() as u64;
 
-                // Count distinct ledgers.
-                let ledgers: std::collections::HashSet<u32> =
-                    accounts.iter().map(|a| a.ledger).collect();
-                let ledger_count = ledgers.len() as u32;
+                // Collect pending accounts for the response.
+                let pending_accounts: Vec<AccountRecord> = accounts
+                    .iter()
+                    .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
+                    .cloned()
+                    .map(account_to_proto)
+                    .collect();
+
+                // Compute per-ledger summaries.
+                let mut ledger_map: std::collections::BTreeMap<u32, (u64, u128, u128)> =
+                    std::collections::BTreeMap::new();
+                for a in &accounts {
+                    let entry = ledger_map.entry(a.ledger).or_insert((0, 0, 0));
+                    entry.0 += 1;
+                    entry.1 += a.debits_posted;
+                    entry.2 += a.credits_posted;
+                }
+                let ledger_count = ledger_map.len() as u32;
+                let ledger_summaries: Vec<LedgerSummary> = ledger_map
+                    .into_iter()
+                    .map(|(ledger, (count, debits, credits))| LedgerSummary {
+                        ledger,
+                        account_count: count,
+                        total_debits_posted: debits.to_string(),
+                        total_credits_posted: credits.to_string(),
+                    })
+                    .collect();
+
+                // Clone accounts before BalancePlan::build() consumes them.
+                let accounts_for_cache = accounts.clone();
 
                 // Build plan to get synthetic transfer count.
                 let plan = tb_compressor::BalancePlan::build(accounts);
-                let synthetic_transfers = plan.total_transfers() as u64;
+                let synthetic_transfers_count = plan.total_transfers() as u64;
 
-                Ok(PlanMigrationResponse {
+                let cached = CachedMigrationPlan {
+                    accounts: accounts_for_cache,
+                    synthetic_transfers: plan.synthetic_transfers.clone(),
+                };
+
+                let response = PlanMigrationResponse {
                     accounts: total_accounts,
                     pending_transfers: pending,
-                    synthetic_transfers,
+                    synthetic_transfers: synthetic_transfers_count,
                     safe: pending == 0,
                     ledgers: ledger_count,
-                })
-            })
-            .await
-            .map_err(|e| Status::internal(format!("task join: {e}")))?
-            .map_err(|e| {
-                warn!("PlanMigration error: {e}");
-                Status::internal(e)
-            })?;
+                    ledger_summaries,
+                    pending_accounts,
+                };
 
-        Ok(Response::new(result))
+                Ok((response, cached))
+            },
+        )
+        .await
+        .map_err(|e| Status::internal(format!("task join: {e}")))?
+        .map_err(|e| {
+            warn!("PlanMigration error: {e}");
+            Status::internal(e)
+        })?;
+
+        // Store the cached plan for drill-down RPCs.
+        *self.state.cached_migration.write().await = Some(result.1);
+
+        Ok(Response::new(result.0))
+    }
+
+    async fn get_migration_accounts(
+        &self,
+        request: Request<GetMigrationAccountsRequest>,
+    ) -> Result<Response<GetMigrationAccountsResponse>, Status> {
+        let req = request.into_inner();
+        let page = req.page as usize;
+        let limit = (req.limit as usize).min(500).max(1);
+
+        let cache_guard = self.state.cached_migration.read().await;
+        let cached = cache_guard.as_ref().ok_or_else(|| {
+            Status::not_found("No cached migration plan. Run PlanMigration first.")
+        })?;
+
+        let filter = req.filter;
+
+        // Apply filters.
+        let matched: Vec<&tb_reader::Account> = cached
+            .accounts
+            .iter()
+            .filter(|a| {
+                if let Some(ref f) = filter {
+                    if let Some(ref id_str) = f.id {
+                        if let Ok(id_val) = id_str.parse::<u128>() {
+                            if a.id != id_val {
+                                return false;
+                            }
+                        }
+                    }
+                    if let Some(ledger) = f.ledger {
+                        if a.ledger != ledger {
+                            return false;
+                        }
+                    }
+                    if let Some(code) = f.code {
+                        if a.code as u32 != code {
+                            return false;
+                        }
+                    }
+                    if let Some(flags) = f.flags {
+                        if a.flags.raw() as u32 != flags {
+                            return false;
+                        }
+                    }
+                    if let Some(ud32) = f.user_data_32 {
+                        if a.user_data_32 != ud32 {
+                            return false;
+                        }
+                    }
+                    if let Some(ud64) = f.user_data_64 {
+                        if a.user_data_64 != ud64 {
+                            return false;
+                        }
+                    }
+                    if let Some(ref ud128_str) = f.user_data_128 {
+                        if let Ok(ud128_val) = ud128_str.parse::<u128>() {
+                            if a.user_data_128 != ud128_val {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let total_count = matched.len() as u64;
+        let records: Vec<AccountRecord> = matched
+            .into_iter()
+            .skip(page * limit)
+            .take(limit)
+            .cloned()
+            .map(account_to_proto)
+            .collect();
+
+        Ok(Response::new(GetMigrationAccountsResponse {
+            accounts: records,
+            page: req.page,
+            limit: req.limit,
+            total_count,
+        }))
+    }
+
+    async fn get_migration_synthetic_transfers(
+        &self,
+        request: Request<GetMigrationSyntheticTransfersRequest>,
+    ) -> Result<Response<GetMigrationSyntheticTransfersResponse>, Status> {
+        let req = request.into_inner();
+        let page = req.page as usize;
+        let limit = (req.limit as usize).min(500).max(1);
+
+        let cache_guard = self.state.cached_migration.read().await;
+        let cached = cache_guard.as_ref().ok_or_else(|| {
+            Status::not_found("No cached migration plan. Run PlanMigration first.")
+        })?;
+
+        let matched: Vec<&tb_compressor::SyntheticTransfer> = cached
+            .synthetic_transfers
+            .iter()
+            .filter(|t| {
+                if let Some(ledger) = req.ledger {
+                    t.ledger == ledger
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let total_count = matched.len() as u64;
+        let records: Vec<SyntheticTransferRecord> = matched
+            .into_iter()
+            .skip(page * limit)
+            .take(limit)
+            .map(|t| SyntheticTransferRecord {
+                id: t.id.to_string(),
+                debit_account_id: t.debit_account_id.to_string(),
+                credit_account_id: t.credit_account_id.to_string(),
+                amount: t.amount.to_string(),
+                ledger: t.ledger,
+                code: t.code as u32,
+                timestamp: t.timestamp,
+            })
+            .collect();
+
+        Ok(Response::new(GetMigrationSyntheticTransfersResponse {
+            transfers: records,
+            page: req.page,
+            limit: req.limit,
+            total_count,
+        }))
     }
 
     type ExecuteMigrationStream =
@@ -773,20 +947,10 @@ impl ManagerNode for ManagerNodeService {
             req.new_cluster_id, req.new_addresses, data_file
         );
 
-        // Read all accounts from data file (blocking).
+        // Read all accounts from data file — merge LSM + WAL (blocking).
         let accounts = tokio::task::spawn_blocking({
             let df = data_file.clone();
-            move || -> Result<Vec<tb_reader::Account>, String> {
-                let mut reader =
-                    DataFileReader::open(&df).map_err(|e| format!("open data file: {e}"))?;
-                match reader.iter_accounts() {
-                    Ok(iter) => iter
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|e| format!("read accounts: {e}")),
-                    Err(tb_reader::ReaderError::NotCheckpointed { .. }) => Ok(vec![]),
-                    Err(e) => Err(format!("iter accounts: {e}")),
-                }
-            }
+            move || -> Result<Vec<tb_reader::Account>, String> { read_all_accounts(&df) }
         })
         .await
         .map_err(|e| Status::internal(format!("task join: {e}")))?
@@ -864,6 +1028,45 @@ impl ManagerNode for ManagerNodeService {
 // ---------------------------------------------------------------------------
 // Private helpers on ManagerNodeService
 // ---------------------------------------------------------------------------
+
+/// Read ALL accounts from a data file by merging LSM (checkpointed) and WAL
+/// (pre-checkpoint) sources. WAL accounts override LSM accounts with the same
+/// ID since the WAL has more recent balances.
+fn read_all_accounts(data_file: &str) -> Result<Vec<tb_reader::Account>, String> {
+    use std::collections::HashMap;
+
+    let mut reader = DataFileReader::open(data_file).map_err(|e| format!("open data file: {e}"))?;
+
+    // 1. Read LSM accounts (checkpointed).
+    let lsm_accounts: Vec<tb_reader::Account> = match reader.iter_accounts() {
+        Ok(iter) => iter
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read LSM accounts: {e}"))?,
+        Err(tb_reader::ReaderError::NotCheckpointed { .. }) => vec![],
+        Err(e) => return Err(format!("iter LSM accounts: {e}")),
+    };
+
+    // 2. Read WAL accounts (post-checkpoint, not yet flushed to LSM).
+    let wal_accounts: Vec<tb_reader::Account> = match reader.iter_wal_accounts() {
+        Ok(iter) => iter
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read WAL accounts: {e}"))?,
+        Err(e) => return Err(format!("iter WAL accounts: {e}")),
+    };
+
+    if wal_accounts.is_empty() {
+        return Ok(lsm_accounts);
+    }
+
+    // 3. Merge: start with LSM, then override/add from WAL (WAL has latest state).
+    let mut by_id: HashMap<u128, tb_reader::Account> =
+        lsm_accounts.into_iter().map(|a| (a.id, a)).collect();
+    for acc in wal_accounts {
+        by_id.insert(acc.id, acc); // WAL overrides LSM for same ID
+    }
+
+    Ok(by_id.into_values().collect())
+}
 
 fn account_to_proto(a: tb_reader::Account) -> AccountRecord {
     AccountRecord {

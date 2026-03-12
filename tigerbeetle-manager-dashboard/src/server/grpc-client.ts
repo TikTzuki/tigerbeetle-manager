@@ -348,6 +348,35 @@ export interface PlanMigrationResponse {
     synthetic_transfers: string;
     safe: boolean;
     ledgers: number;
+    ledger_summaries: LedgerSummary[];
+    pending_accounts: AccountRecord[];
+}
+
+export interface LedgerSummary {
+    ledger: number;
+    account_count: string;
+    total_debits_posted: string;
+    total_credits_posted: string;
+}
+
+export interface SyntheticTransferRecord {
+    id: string;
+    debit_account_id: string;
+    credit_account_id: string;
+    amount: string;
+    ledger: number;
+    code: number;
+    timestamp: string;
+}
+
+export interface MigrationAccountFilter {
+    id?: string;
+    ledger?: number;
+    code?: number;
+    flags?: number;
+    user_data_32?: number;
+    user_data_64?: string;
+    user_data_128?: string;
 }
 
 export async function planMigration(
@@ -357,6 +386,44 @@ export async function planMigration(
     const client = createClient(`${host}:${port}`);
     try {
         return await promisify<PlanMigrationResponse>(client, "PlanMigration", {});
+    } finally {
+        client.close();
+    }
+}
+
+export async function getMigrationAccounts(
+    host: string,
+    port: number,
+    page: number,
+    limit: number,
+    filter?: MigrationAccountFilter
+): Promise<{ accounts: AccountRecord[]; page: number; limit: number; total_count: string }> {
+    const client = createClient(`${host}:${port}`);
+    try {
+        return await promisify(client, "GetMigrationAccounts", {
+            page,
+            limit,
+            filter: filter ?? {},
+        });
+    } finally {
+        client.close();
+    }
+}
+
+export async function getMigrationSyntheticTransfers(
+    host: string,
+    port: number,
+    page: number,
+    limit: number,
+    ledger?: number
+): Promise<{ transfers: SyntheticTransferRecord[]; page: number; limit: number; total_count: string }> {
+    const client = createClient(`${host}:${port}`);
+    try {
+        return await promisify(client, "GetMigrationSyntheticTransfers", {
+            page,
+            limit,
+            ...(ledger !== undefined ? {ledger} : {}),
+        });
     } finally {
         client.close();
     }

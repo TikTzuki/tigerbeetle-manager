@@ -3,6 +3,8 @@ import {protectedProcedure, publicProcedure, router} from "@/server/trpc";
 import {cookies} from "next/headers";
 import {getNodeConfigs} from "@/server/nodes";
 import {
+    getMigrationAccounts,
+    getMigrationSyntheticTransfers,
     getNodeBackupConfig,
     getNodeStatus,
     modifyNodeBackupConfig,
@@ -288,5 +290,43 @@ export const managerRouter = router({
             const node = nodes.find((n) => n.id === input.nodeId);
             if (!node) throw new Error(`Node ${input.nodeId} not found`);
             return planMigration(node.host, node.port);
+        }),
+
+    // Browse cached migration accounts with filtering and pagination.
+    getMigrationAccounts: protectedProcedure
+        .input(z.object({
+            nodeId: z.string(),
+            page: z.number().int().min(0).default(0),
+            limit: z.number().int().min(1).max(500).default(100),
+            filter: z.object({
+                id: z.string().optional(),
+                ledger: z.number().int().optional(),
+                code: z.number().int().optional(),
+                flags: z.number().int().optional(),
+                user_data_32: z.number().int().optional(),
+                user_data_64: z.string().optional(),
+                user_data_128: z.string().optional(),
+            }).optional(),
+        }))
+        .query(async ({input}) => {
+            const nodes = getNodeConfigs();
+            const node = nodes.find((n) => n.id === input.nodeId);
+            if (!node) throw new Error(`Node ${input.nodeId} not found`);
+            return getMigrationAccounts(node.host, node.port, input.page, input.limit, input.filter);
+        }),
+
+    // Browse cached migration synthetic transfers with pagination.
+    getMigrationSyntheticTransfers: protectedProcedure
+        .input(z.object({
+            nodeId: z.string(),
+            page: z.number().int().min(0).default(0),
+            limit: z.number().int().min(1).max(500).default(100),
+            ledger: z.number().int().optional(),
+        }))
+        .query(async ({input}) => {
+            const nodes = getNodeConfigs();
+            const node = nodes.find((n) => n.id === input.nodeId);
+            if (!node) throw new Error(`Node ${input.nodeId} not found`);
+            return getMigrationSyntheticTransfers(node.host, node.port, input.page, input.limit, input.ledger);
         }),
 });

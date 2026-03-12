@@ -24,9 +24,6 @@ function formatTs(ts: string): string {
     return new Date(n / 1_000_000).toISOString();
 }
 
-function truncId(id: string, len = 20): string {
-    return id.length > len ? id.slice(0, len) + "…" : id;
-}
 
 function formatBytes(bytes: number): string {
     if (bytes === 0) return "0 B";
@@ -506,10 +503,10 @@ function AccountRows({accounts}: { accounts: AccountRecord[] }) {
         <>
             {accounts.map((a, i) => (
                 <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 font-mono text-gray-800 whitespace-nowrap" title={a.id}>
-                        <span className="flex items-center gap-0.5">
-                            {truncId(a.id, 18)}<CopyButton value={a.id}/>
-                        </span>
+                    <td className="px-3 py-1.5 font-mono text-gray-800" title={a.id}>
+                        <div className="flex items-center gap-0.5 max-w-[14rem] min-w-0">
+                            <span className="truncate min-w-0">{a.id}</span><CopyButton value={a.id}/>
+                        </div>
                     </td>
                     <td className="px-3 py-1.5 text-gray-600">{a.ledger}</td>
                     <td className="px-3 py-1.5 text-gray-600">{a.code}</td>
@@ -517,12 +514,12 @@ function AccountRows({accounts}: { accounts: AccountRecord[] }) {
                     <td className="px-3 py-1.5 font-mono text-gray-700 text-right">{a.debits_posted || "0"}</td>
                     <td className="px-3 py-1.5 font-mono text-gray-700 text-right">{a.credits_pending || "0"}</td>
                     <td className="px-3 py-1.5 font-mono text-gray-700 text-right">{a.credits_posted || "0"}</td>
-                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs whitespace-nowrap"
-                        title={a.user_data_128}>
-                        {a.user_data_128 && a.user_data_128 !== "0" ? truncId(a.user_data_128, 14) :
-                            <span className="text-gray-300">—</span>}
+                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs" title={a.user_data_128}>
+                        {a.user_data_128 && a.user_data_128 !== "0"
+                            ? <span className="block truncate max-w-[10rem]">{a.user_data_128}</span>
+                            : <span className="text-gray-300">—</span>}
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs">
+                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs" title={a.user_data_64}>
                         {a.user_data_64 && a.user_data_64 !== "0" ? a.user_data_64 :
                             <span className="text-gray-300">—</span>}
                     </td>
@@ -545,30 +542,33 @@ function TransferRows({transfers}: { transfers: TransferRecord[] }) {
         <>
             {transfers.map((t, i) => (
                 <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 font-mono text-gray-800 whitespace-nowrap" title={t.id}>
-                        <span className="flex items-center gap-0.5">
-                            {truncId(t.id, 18)}<CopyButton value={t.id}/>
-                        </span>
+                    <td className="px-3 py-1.5 font-mono text-gray-800" title={t.id}>
+                        <div className="flex items-center gap-0.5 max-w-[14rem] min-w-0">
+                            <span className="truncate min-w-0">{t.id}</span><CopyButton value={t.id}/>
+                        </div>
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-gray-600 whitespace-nowrap" title={t.debit_account_id}>
-                        <span className="flex items-center gap-0.5">
-                            {truncId(t.debit_account_id, 14)}<CopyButton value={t.debit_account_id}/>
-                        </span>
+                    <td className="px-3 py-1.5 font-mono text-gray-600" title={t.debit_account_id}>
+                        <div className="flex items-center gap-0.5 max-w-[12rem] min-w-0">
+                            <span className="truncate min-w-0">{t.debit_account_id}</span><CopyButton
+                            value={t.debit_account_id}/>
+                        </div>
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-gray-600 whitespace-nowrap" title={t.credit_account_id}>
-                        <span className="flex items-center gap-0.5">
-                            {truncId(t.credit_account_id, 14)}<CopyButton value={t.credit_account_id}/>
-                        </span>
+                    <td className="px-3 py-1.5 font-mono text-gray-600" title={t.credit_account_id}>
+                        <div className="flex items-center gap-0.5 max-w-[12rem] min-w-0">
+                            <span className="truncate min-w-0">{t.credit_account_id}</span><CopyButton
+                            value={t.credit_account_id}/>
+                        </div>
                     </td>
                     <td className="px-3 py-1.5 font-mono text-gray-700 text-right">{t.amount}</td>
-                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs whitespace-nowrap" title={t.pending_id}>
-                        {t.pending_id && t.pending_id !== "0" ? truncId(t.pending_id, 14) :
-                            <span className="text-gray-300">—</span>}
+                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs" title={t.pending_id}>
+                        {t.pending_id && t.pending_id !== "0"
+                            ? <span className="block truncate max-w-[10rem]">{t.pending_id}</span>
+                            : <span className="text-gray-300">—</span>}
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs whitespace-nowrap"
-                        title={t.user_data_128}>
-                        {t.user_data_128 && t.user_data_128 !== "0" ? truncId(t.user_data_128, 14) :
-                            <span className="text-gray-300">—</span>}
+                    <td className="px-3 py-1.5 font-mono text-gray-500 text-xs" title={t.user_data_128}>
+                        {t.user_data_128 && t.user_data_128 !== "0"
+                            ? <span className="block truncate max-w-[10rem]">{t.user_data_128}</span>
+                            : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-3 py-1.5 font-mono text-gray-500 text-xs">
                         {t.user_data_64 && t.user_data_64 !== "0" ? t.user_data_64 :
@@ -864,6 +864,18 @@ interface MigrationProgressEvent {
     error: string;
 }
 
+type DetailPanel = "accounts" | "ledgers" | "transfers" | "pending" | null;
+
+interface MigrationAccountFilter {
+    id?: string;
+    ledger?: number;
+    code?: number;
+    flags?: number;
+    user_data_32?: number;
+    user_data_64?: string;
+    user_data_128?: string;
+}
+
 function MigratePanel({nodeId}: { nodeId: string }) {
     const planQuery = trpc.manager.planMigration.useQuery(
         {nodeId},
@@ -876,8 +888,48 @@ function MigratePanel({nodeId}: { nodeId: string }) {
     const [migrationDone, setMigrationDone] = useState(false);
     const [migrationError, setMigrationError] = useState<string | null>(null);
 
+    // Drill-down state
+    const [activeDetail, setActiveDetail] = useState<DetailPanel>(null);
+    const [detailPage, setDetailPage] = useState(0);
+    const [accountFilter, setAccountFilter] = useState<MigrationAccountFilter>({});
+    const [filterDraft, setFilterDraft] = useState<MigrationAccountFilter>({});
+
+    const DETAIL_LIMIT = 100;
+
+    // Paginated account drill-down query
+    const accountsQuery = trpc.manager.getMigrationAccounts.useQuery(
+        {nodeId, page: detailPage, limit: DETAIL_LIMIT, filter: accountFilter},
+        {enabled: activeDetail === "accounts"}
+    );
+
+    // Paginated synthetic transfer drill-down query
+    const transfersQuery = trpc.manager.getMigrationSyntheticTransfers.useQuery(
+        {nodeId, page: detailPage, limit: DETAIL_LIMIT},
+        {enabled: activeDetail === "transfers"}
+    );
+
     const runPreflight = () => {
         planQuery.refetch();
+    };
+
+    const toggleDetail = (panel: DetailPanel) => {
+        if (activeDetail === panel) {
+            setActiveDetail(null);
+        } else {
+            setActiveDetail(panel);
+            setDetailPage(0);
+        }
+    };
+
+    const applyFilter = () => {
+        setAccountFilter({...filterDraft});
+        setDetailPage(0);
+    };
+
+    const clearFilter = () => {
+        setFilterDraft({});
+        setAccountFilter({});
+        setDetailPage(0);
     };
 
     const startMigration = async () => {
@@ -946,6 +998,13 @@ function MigratePanel({nodeId}: { nodeId: string }) {
     const plan = planQuery.data;
     const latestProgress = progress.length > 0 ? progress[progress.length - 1] : null;
 
+    const cardClass = (panel: DetailPanel) =>
+        `rounded-lg border p-3 cursor-pointer transition-colors ${
+            activeDetail === panel
+                ? "border-blue-400 bg-blue-50"
+                : "border-gray-100 bg-gray-50 hover:border-blue-300"
+        }`;
+
     return (
         <div className="space-y-6">
             {/* Step 1: Pre-flight check */}
@@ -971,24 +1030,25 @@ function MigratePanel({nodeId}: { nodeId: string }) {
 
                 {plan && (
                     <div className="mt-4 space-y-3">
+                        {/* Clickable stat cards */}
                         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                            <div className={cardClass("accounts")} onClick={() => toggleDetail("accounts")}>
                                 <div className="text-xs text-gray-500">Accounts</div>
                                 <div className="text-lg font-bold tabular-nums">
                                     {parseInt(plan.accounts, 10).toLocaleString()}
                                 </div>
                             </div>
-                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                            <div className={cardClass("ledgers")} onClick={() => toggleDetail("ledgers")}>
                                 <div className="text-xs text-gray-500">Ledgers</div>
                                 <div className="text-lg font-bold tabular-nums">{plan.ledgers}</div>
                             </div>
-                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                            <div className={cardClass("transfers")} onClick={() => toggleDetail("transfers")}>
                                 <div className="text-xs text-gray-500">Synthetic Transfers</div>
                                 <div className="text-lg font-bold tabular-nums">
                                     {parseInt(plan.synthetic_transfers, 10).toLocaleString()}
                                 </div>
                             </div>
-                            <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+                            <div className={cardClass("pending")} onClick={() => toggleDetail("pending")}>
                                 <div className="text-xs text-gray-500">Pending</div>
                                 <div
                                     className={`text-lg font-bold tabular-nums ${parseInt(plan.pending_transfers, 10) > 0 ? "text-red-600" : "text-green-600"}`}>
@@ -996,6 +1056,222 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                                 </div>
                             </div>
                         </div>
+
+                        {/* Detail panels */}
+                        {activeDetail === "accounts" && (
+                            <div className="space-y-3 rounded-lg border border-blue-200 bg-white p-4">
+                                <h4 className="text-xs font-semibold text-gray-700">Migration Accounts</h4>
+                                {/* Filter bar */}
+                                <div className="flex flex-wrap items-end gap-2">
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">ID</label>
+                                        <input
+                                            type="text"
+                                            value={filterDraft.id ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                id: e.target.value || undefined
+                                            })}
+                                            placeholder="exact u128"
+                                            className="w-36 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">Ledger</label>
+                                        <input
+                                            type="number"
+                                            value={filterDraft.ledger ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                ledger: e.target.value ? parseInt(e.target.value) : undefined
+                                            })}
+                                            className="w-20 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">Code</label>
+                                        <input
+                                            type="number"
+                                            value={filterDraft.code ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                code: e.target.value ? parseInt(e.target.value) : undefined
+                                            })}
+                                            className="w-20 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">Flags</label>
+                                        <input
+                                            type="number"
+                                            value={filterDraft.flags ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                flags: e.target.value ? parseInt(e.target.value) : undefined
+                                            })}
+                                            className="w-20 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">UD32</label>
+                                        <input
+                                            type="number"
+                                            value={filterDraft.user_data_32 ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                user_data_32: e.target.value ? parseInt(e.target.value) : undefined
+                                            })}
+                                            className="w-20 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">UD64</label>
+                                        <input
+                                            type="text"
+                                            value={filterDraft.user_data_64 ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                user_data_64: e.target.value || undefined
+                                            })}
+                                            className="w-24 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] text-gray-500">UD128</label>
+                                        <input
+                                            type="text"
+                                            value={filterDraft.user_data_128 ?? ""}
+                                            onChange={(e) => setFilterDraft({
+                                                ...filterDraft,
+                                                user_data_128: e.target.value || undefined
+                                            })}
+                                            className="w-32 rounded border border-gray-200 px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                                        />
+                                    </div>
+                                    <button onClick={applyFilter}
+                                            className="rounded bg-gray-900 px-3 py-1 text-xs font-medium text-white hover:bg-gray-800">
+                                        Apply
+                                    </button>
+                                    <button onClick={clearFilter}
+                                            className="rounded border border-gray-300 px-3 py-1 text-xs text-gray-600 hover:bg-gray-50">
+                                        Clear
+                                    </button>
+                                </div>
+                                <RecordTable
+                                    headers={ACCOUNT_HEADERS}
+                                    empty={!accountsQuery.isLoading && (accountsQuery.data?.accounts ?? []).length === 0}
+                                    loading={accountsQuery.isLoading}
+                                >
+                                    <AccountRows accounts={(accountsQuery.data?.accounts ?? []) as AccountRecord[]}/>
+                                </RecordTable>
+                                <Pager
+                                    page={detailPage}
+                                    hasMore={(accountsQuery.data?.accounts ?? []).length === DETAIL_LIMIT}
+                                    onPrev={() => setDetailPage((p) => Math.max(0, p - 1))}
+                                    onNext={() => setDetailPage((p) => p + 1)}
+                                    loading={accountsQuery.isLoading}
+                                    count={(accountsQuery.data?.accounts ?? []).length}
+                                />
+                                {accountsQuery.data?.total_count != null && (
+                                    <span className="text-[10px] text-gray-400">
+                                        Total matching: {parseInt(accountsQuery.data.total_count, 10).toLocaleString()}
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
+                        {activeDetail === "ledgers" && (
+                            <div className="space-y-3 rounded-lg border border-blue-200 bg-white p-4">
+                                <h4 className="text-xs font-semibold text-gray-700">Ledger Summaries</h4>
+                                <RecordTable
+                                    headers={["Ledger", "Account Count", "Total Debits Posted", "Total Credits Posted"]}
+                                    empty={(plan.ledger_summaries ?? []).length === 0}
+                                >
+                                    {(plan.ledger_summaries ?? []).map((ls, i) => (
+                                        <tr key={i} className="hover:bg-gray-50">
+                                            <td className="px-3 py-1.5 text-gray-800">{ls.ledger}</td>
+                                            <td className="px-3 py-1.5 font-mono text-gray-700 text-right">
+                                                {parseInt(ls.account_count, 10).toLocaleString()}
+                                            </td>
+                                            <td className="px-3 py-1.5 font-mono text-gray-700 text-right">
+                                                {ls.total_debits_posted}
+                                            </td>
+                                            <td className="px-3 py-1.5 font-mono text-gray-700 text-right">
+                                                {ls.total_credits_posted}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </RecordTable>
+                            </div>
+                        )}
+
+                        {activeDetail === "transfers" && (
+                            <div className="space-y-3 rounded-lg border border-blue-200 bg-white p-4">
+                                <h4 className="text-xs font-semibold text-gray-700">Synthetic Transfers</h4>
+                                <RecordTable
+                                    headers={["ID", "Debit Account", "Credit Account", "Amount", "Ledger", "Code", "Timestamp"]}
+                                    empty={!transfersQuery.isLoading && (transfersQuery.data?.transfers ?? []).length === 0}
+                                    loading={transfersQuery.isLoading}
+                                >
+                                    {(transfersQuery.data?.transfers ?? []).map((t, i) => (
+                                        <tr key={i} className="hover:bg-gray-50">
+                                            <td className="px-3 py-1.5 font-mono text-gray-800" title={t.id}>
+                                                <div className="flex items-center gap-0.5 max-w-[14rem] min-w-0">
+                                                    <span className="truncate min-w-0">{t.id}</span><CopyButton
+                                                    value={t.id}/>
+                                                </div>
+                                            </td>
+                                            <td className="px-3 py-1.5 font-mono text-gray-600"
+                                                title={t.debit_account_id}>
+                                                <div className="flex items-center gap-0.5 max-w-[12rem] min-w-0">
+                                                    <span
+                                                        className="truncate min-w-0">{t.debit_account_id}</span><CopyButton
+                                                    value={t.debit_account_id}/>
+                                                </div>
+                                            </td>
+                                            <td className="px-3 py-1.5 font-mono text-gray-600"
+                                                title={t.credit_account_id}>
+                                                <div className="flex items-center gap-0.5 max-w-[12rem] min-w-0">
+                                                    <span
+                                                        className="truncate min-w-0">{t.credit_account_id}</span><CopyButton
+                                                    value={t.credit_account_id}/>
+                                                </div>
+                                            </td>
+                                            <td className="px-3 py-1.5 font-mono text-gray-700 text-right">{t.amount}</td>
+                                            <td className="px-3 py-1.5 text-gray-600">{t.ledger}</td>
+                                            <td className="px-3 py-1.5 text-gray-600">{t.code}</td>
+                                            <td className="px-3 py-1.5 text-gray-500 text-xs whitespace-nowrap">{formatTs(t.timestamp)}</td>
+                                        </tr>
+                                    ))}
+                                </RecordTable>
+                                <Pager
+                                    page={detailPage}
+                                    hasMore={(transfersQuery.data?.transfers ?? []).length === DETAIL_LIMIT}
+                                    onPrev={() => setDetailPage((p) => Math.max(0, p - 1))}
+                                    onNext={() => setDetailPage((p) => p + 1)}
+                                    loading={transfersQuery.isLoading}
+                                    count={(transfersQuery.data?.transfers ?? []).length}
+                                />
+                                {transfersQuery.data?.total_count != null && (
+                                    <span className="text-[10px] text-gray-400">
+                                        Total: {parseInt(transfersQuery.data.total_count, 10).toLocaleString()}
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
+                        {activeDetail === "pending" && (
+                            <div className="space-y-3 rounded-lg border border-blue-200 bg-white p-4">
+                                <h4 className="text-xs font-semibold text-gray-700">Accounts with Pending Balances</h4>
+                                <RecordTable
+                                    headers={ACCOUNT_HEADERS}
+                                    empty={(plan.pending_accounts ?? []).length === 0}
+                                >
+                                    <AccountRows accounts={(plan.pending_accounts ?? []) as AccountRecord[]}/>
+                                </RecordTable>
+                            </div>
+                        )}
+
                         {plan.safe ? (
                             <div className="rounded border border-green-200 bg-green-50 p-3 text-xs text-green-800">
                                 Migration is safe to proceed. No pending transfers found.
