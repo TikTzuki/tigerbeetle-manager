@@ -10,8 +10,16 @@ pub struct AccountGroup {
     pub ledger: u32,
     /// All accounts in this ledger.
     pub accounts: Vec<Account>,
-    /// GENESIS account ID for this ledger (reserved ID used as counterparty).
-    pub genesis_id: u128,
+    /// Genesis credit account ID — the debit counterparty for credit-side transfers.
+    ///
+    /// After migration: `genesis_credit.debits_posted = Σ(acc.credits_posted)`.
+    pub genesis_credit_id: u128,
+    /// Genesis debit account ID — the credit counterparty for debit-side transfers.
+    ///
+    /// After migration: `genesis_debit.credits_posted = Σ(acc.debits_posted)`.
+    /// Invariant: `genesis_credit.debits_posted == genesis_debit.credits_posted`
+    /// iff the ledger is balanced (total credits == total debits).
+    pub genesis_debit_id: u128,
 }
 
 /// A synthetic transfer that reconstructs an account's balance.
@@ -36,7 +44,12 @@ pub struct SyntheticTransfer {
 /// The complete compression plan — genesis accounts + synthetic transfers.
 #[derive(Debug, Clone)]
 pub struct BalancePlan {
-    /// Genesis accounts (one per ledger) used as counterparties.
+    /// Genesis accounts (two per ledger): credit genesis + debit genesis.
+    ///
+    /// Credit genesis: debit counterparty for credit-side transfers.
+    /// Debit genesis: credit counterparty for debit-side transfers.
+    /// After migration, `credit_genesis.debits_posted == debit_genesis.credits_posted`
+    /// iff the ledger is balanced.
     pub genesis_accounts: Vec<Account>,
     /// All regular accounts to import (preserving original IDs and flags).
     pub regular_accounts: Vec<Account>,
@@ -72,12 +85,16 @@ impl BalancePlan {
         let mut groups: Vec<AccountGroup> = groups_map
             .into_iter()
             .map(|(ledger, accounts)| {
-                // Genesis ID: u128::MAX - ledger (reserved range).
-                let genesis_id = u128::MAX - u128::from(ledger);
+                // Two genesis IDs per ledger in the reserved u128::MAX range.
+                // genesis_credit_id: debit counterparty for credit-side transfers.
+                // genesis_debit_id:  credit counterparty for debit-side transfers.
+                let genesis_credit_id = u128::MAX - u128::from(ledger) * 2;
+                let genesis_debit_id = u128::MAX - u128::from(ledger) * 2 - 1;
                 AccountGroup {
                     ledger,
                     accounts,
-                    genesis_id,
+                    genesis_credit_id,
+                    genesis_debit_id,
                 }
             })
             .collect();
@@ -85,17 +102,19 @@ impl BalancePlan {
         // Sort by ledger for deterministic output.
         groups.sort_by_key(|g| g.ledger);
 
-        // Build genesis accounts with sequential timestamps starting at 1ns.
+        // Build two genesis accounts per ledger with sequential timestamps starting at 1ns.
+        // Order: credit genesis (2*i+1), debit genesis (2*i+2) for ledger at index i.
         // TigerBeetle requires imported timestamps > 0 and strictly increasing.
-        let genesis_accounts: Vec<Account> = groups
-            .iter()
-            .enumerate()
-            .map(|(i, group)| Account {
-                id: group.genesis_id,
+        let mut genesis_accounts: Vec<Account> = Vec::with_capacity(groups.len() * 2);
+        for (i, group) in groups.iter().enumerate() {
+            let base_ts = (i as u64) * 2 + 1;
+            // Credit genesis account (debit counterparty for credit-side transfers).
+            genesis_accounts.push(Account {
+                id: group.genesis_credit_id,
                 ledger: group.ledger,
-                code: 0,
+                code: 1,
                 flags: tb_reader::AccountFlags::from(0),
-                timestamp: (i as u64) + 1, // 1ns, 2ns, …, K ns
+                timestamp: base_ts,
                 debits_pending: 0,
                 debits_posted: 0,
                 credits_pending: 0,
@@ -104,11 +123,27 @@ impl BalancePlan {
                 user_data_64: 0,
                 user_data_32: 0,
                 reserved: 0,
-            })
-            .collect();
+            });
+            // Debit genesis account (credit counterparty for debit-side transfers).
+            genesis_accounts.push(Account {
+                id: group.genesis_debit_id,
+                ledger: group.ledger,
+                code: 1,
+                flags: tb_reader::AccountFlags::from(0),
+                timestamp: base_ts + 1,
+                debits_pending: 0,
+                debits_posted: 0,
+                credits_pending: 0,
+                credits_posted: 0,
+                user_data_128: 0,
+                user_data_64: 0,
+                user_data_32: 0,
+                reserved: 0,
+            });
+        }
 
         // The first regular account timestamp must be > last genesis timestamp.
-        let genesis_max_ts = genesis_accounts.len() as u64; // == K
+        let genesis_max_ts = genesis_accounts.len() as u64; // == 2*K
 
         // Flatten all regular accounts and sort by original timestamp.
         let mut regular_accounts: Vec<Account> = groups
@@ -138,21 +173,24 @@ impl BalancePlan {
         let mut transfer_id_counter: u128 = 1; // Start from 1 (0 is reserved).
         let mut transfer_ts = max_account_ts;
 
-        // Re-group by ledger for transfer generation (need genesis_id per ledger).
-        let genesis_by_ledger: HashMap<u32, u128> =
-            groups.iter().map(|g| (g.ledger, g.genesis_id)).collect();
+        // Re-group by ledger for transfer generation (need both genesis IDs per ledger).
+        let genesis_by_ledger: HashMap<u32, (u128, u128)> = groups
+            .iter()
+            .map(|g| (g.ledger, (g.genesis_credit_id, g.genesis_debit_id)))
+            .collect();
 
         for acc in &regular_accounts {
-            let genesis_id = genesis_by_ledger[&acc.ledger];
+            let (genesis_credit_id, genesis_debit_id) = genesis_by_ledger[&acc.ledger];
 
             // Credit side: if credits_posted > 0, create transfer:
-            //   debit=GENESIS, credit=account, amount=credits_posted
+            //   debit=genesis_credit, credit=account, amount=credits_posted
+            // genesis_credit.debits_posted accumulates Σ(acc.credits_posted).
             // This transfer happens FIRST to satisfy debits_must_not_exceed_credits.
             if acc.credits_posted > 0 {
                 transfer_ts += 1;
                 synthetic_transfers.push(SyntheticTransfer {
                     id: transfer_id_counter,
-                    debit_account_id: genesis_id,
+                    debit_account_id: genesis_credit_id,
                     credit_account_id: acc.id,
                     amount: acc.credits_posted,
                     ledger: acc.ledger,
@@ -163,13 +201,15 @@ impl BalancePlan {
             }
 
             // Debit side: if debits_posted > 0, create transfer:
-            //   debit=account, credit=GENESIS, amount=debits_posted
+            //   debit=account, credit=genesis_debit, amount=debits_posted
+            // genesis_debit.credits_posted accumulates Σ(acc.debits_posted).
+            // Invariant after full migration: genesis_credit.debits_posted == genesis_debit.credits_posted
             if acc.debits_posted > 0 {
                 transfer_ts += 1;
                 synthetic_transfers.push(SyntheticTransfer {
                     id: transfer_id_counter,
                     debit_account_id: acc.id,
-                    credit_account_id: genesis_id,
+                    credit_account_id: genesis_debit_id,
                     amount: acc.debits_posted,
                     ledger: acc.ledger,
                     code: acc.code,
@@ -232,31 +272,38 @@ mod tests {
 
         let plan = BalancePlan::build(vec![account]);
 
-        // Should have 1 genesis account for ledger 1.
-        assert_eq!(plan.genesis_accounts.len(), 1);
+        // ledger=1: genesis_credit_id = u128::MAX - 1*2 = u128::MAX - 2
+        //           genesis_debit_id  = u128::MAX - 1*2 - 1 = u128::MAX - 3
+        let expected_credit_genesis = u128::MAX - 2;
+        let expected_debit_genesis = u128::MAX - 3;
+
+        // Should have 2 genesis accounts for ledger 1 (credit + debit).
+        assert_eq!(plan.genesis_accounts.len(), 2);
         assert_eq!(plan.genesis_accounts[0].ledger, 1);
-        assert_eq!(plan.genesis_accounts[0].id, u128::MAX - 1);
+        assert_eq!(plan.genesis_accounts[0].id, expected_credit_genesis);
         assert_eq!(plan.genesis_accounts[0].timestamp, 1); // 1ns
+        assert_eq!(plan.genesis_accounts[1].id, expected_debit_genesis);
+        assert_eq!(plan.genesis_accounts[1].timestamp, 2); // 2ns
 
         // Should have 1 regular account.
         assert_eq!(plan.regular_accounts.len(), 1);
         assert_eq!(plan.regular_accounts[0].id, 100);
-        assert_eq!(plan.regular_accounts[0].timestamp, 1000); // Original, > genesis(1)
+        assert_eq!(plan.regular_accounts[0].timestamp, 1000); // Original, > genesis(2)
 
         // Should have 2 synthetic transfers (credit + debit).
         assert_eq!(plan.synthetic_transfers.len(), 2);
 
-        // First transfer: credit side (debit=GENESIS, credit=account, amount=200).
+        // First transfer: credit side (debit=genesis_credit, credit=account, amount=200).
         let t0 = &plan.synthetic_transfers[0];
-        assert_eq!(t0.debit_account_id, u128::MAX - 1);
+        assert_eq!(t0.debit_account_id, expected_credit_genesis);
         assert_eq!(t0.credit_account_id, 100);
         assert_eq!(t0.amount, 200);
         assert_eq!(t0.timestamp, 1001); // > max account ts (1000)
 
-        // Second transfer: debit side (debit=account, credit=GENESIS, amount=50).
+        // Second transfer: debit side (debit=account, credit=genesis_debit, amount=50).
         let t1 = &plan.synthetic_transfers[1];
         assert_eq!(t1.debit_account_id, 100);
-        assert_eq!(t1.credit_account_id, u128::MAX - 1);
+        assert_eq!(t1.credit_account_id, expected_debit_genesis);
         assert_eq!(t1.amount, 50);
         assert_eq!(t1.timestamp, 1002); // Strictly increasing
     }
@@ -298,10 +345,12 @@ mod tests {
 
         let plan = BalancePlan::build(accounts);
 
-        // Should have 2 genesis accounts (one per ledger).
-        assert_eq!(plan.genesis_accounts.len(), 2);
-        assert_eq!(plan.genesis_accounts[0].timestamp, 1); // 1ns
-        assert_eq!(plan.genesis_accounts[1].timestamp, 2); // 2ns
+        // Should have 4 genesis accounts (2 per ledger: credit + debit).
+        assert_eq!(plan.genesis_accounts.len(), 4);
+        assert_eq!(plan.genesis_accounts[0].timestamp, 1); // ledger 1 credit genesis
+        assert_eq!(plan.genesis_accounts[1].timestamp, 2); // ledger 1 debit genesis
+        assert_eq!(plan.genesis_accounts[2].timestamp, 3); // ledger 2 credit genesis
+        assert_eq!(plan.genesis_accounts[3].timestamp, 4); // ledger 2 debit genesis
 
         // Should have 2 regular accounts, sorted by timestamp.
         assert_eq!(plan.regular_accounts.len(), 2);
@@ -355,7 +404,7 @@ mod tests {
         // Timestamps must be strictly increasing.
         assert_eq!(plan.regular_accounts.len(), 2);
         assert!(plan.regular_accounts[0].timestamp < plan.regular_accounts[1].timestamp);
-        // Both must be > genesis timestamp (1ns for 1 ledger).
-        assert!(plan.regular_accounts[0].timestamp > 1);
+        // Both must be > last genesis timestamp (2ns for 1 ledger: credit=1, debit=2).
+        assert!(plan.regular_accounts[0].timestamp > 2);
     }
 }

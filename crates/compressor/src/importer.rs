@@ -98,7 +98,7 @@ impl Importer {
         // Phase 1: genesis accounts.
         let genesis_total = plan.genesis_accounts.len() as u64;
         let mut genesis_imported = 0u64;
-        debug!("Starting import of genesis accounts: total={genesis_total}");
+        info!("Starting import of genesis accounts: total={genesis_total}");
         for chunk in plan.genesis_accounts.chunks(BATCH_SIZE) {
             let tb_accounts: Vec<Account> =
                 chunk.iter().map(|acc| convert_account(acc, true)).collect();
@@ -116,7 +116,7 @@ impl Importer {
                 .await;
         }
 
-        debug!(
+        info!(
             "Finished importing genesis accounts, starting regular accounts: total={}",
             plan.regular_accounts.len()
         );
@@ -141,7 +141,7 @@ impl Importer {
         }
 
         // Phase 3: synthetic transfers.
-        debug!(
+        info!(
             "Finished importing accounts, starting synthetic transfers: total={}",
             plan.synthetic_transfers.len()
         );
@@ -228,7 +228,7 @@ fn convert_account(acc: &ReaderAccount, imported: bool) -> Account {
     }
 
     info!(
-        "Converting account {} with flags {:?} {:?} (imported={})",
+        "Converting account {} with code {:?}, flags {:?} (imported={})",
         acc.id, acc.code, flags, imported
     );
     let mut account = Account::new(acc.id, acc.ledger, acc.code)

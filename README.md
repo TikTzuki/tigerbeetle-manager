@@ -108,12 +108,10 @@ manager.run().await?;
 **Official binary** for production use. Runs TigerBeetle with optional periodic backups controlled via REST API.
 
 ```bash
-tigerbeetle-manager-server \
-  --interval-secs 3600 \
-  --backup-file /data/0_0.tigerbeetle \
-  --bucket my-s3-bucket \
-  --port 8080 \
-  -- start --addresses=3000 /data/0_0.tigerbeetle
+tb-manager-node -- \
+--exe tigerbeetle \
+-- start --addresses=3000 \
+data/0_0.tigerbeetle
 ```
 
 **REST API:**
@@ -138,13 +136,101 @@ cargo run --bin read-accounts -- /path/to/0_0.tigerbeetle
 cargo run --bin read-transfers -- /path/to/0_0.tigerbeetle
 ```
 
-### Run manager server
+### Run manager node
 
 ```bash
-cargo run --bin tigerbeetle-manager-server -- \
+cargo run --bin tb-manager-node -- \
   --port 8080 \
   -- start --addresses=3000 /path/to/0_0.tigerbeetle
 ```
+
+## CDC (Change Data Capture) via AMQP
+
+TigerBeetle ships an `amqp` sub-command that connects to a running cluster and
+publishes every committed event to a RabbitMQ exchange in real time.
+`tb-manager-node` can wrap this process exactly like it wraps `start`, giving
+you gRPC-based lifecycle management, log streaming, and restart-on-crash for the
+CDC consumer.
+
+### Native TigerBeetle command
+
+```bash
+./tigerbeetle amqp \
+  --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 \
+  --cluster=0 \
+  --host=127.0.0.1 \
+  --vhost=/ \
+  --user=guest --password=guest \
+  --publish-exchange=tigerbeetle
+```
+
+### Via tb-manager-node
+
+Pass the `amqp` subcommand and all its flags after `--`. Run this as a **second
+node** alongside your `start` node (each node is a separate process):
+
+```bash
+tb-manager-node \
+  --node-id   cdc-node-0 \
+  --grpc-port 9091 \
+  --exe       ./tigerbeetle \
+  -- amqp \
+    --addresses=127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002 \
+    --cluster=0 \
+    --host=127.0.0.1 \
+    --vhost=/ \
+    --user=guest --password=guest \
+    --publish-exchange=tigerbeetle
+```
+
+The node treats the `amqp` process identically to a `start` process — it will:
+
+- Stream stdout/stderr via `StreamLogs` gRPC
+- Restart the process if it exits unexpectedly
+- Expose status via `GetStatus` gRPC
+
+### Typical two-node setup
+
+```
+# Node 0 — runs TigerBeetle
+tb-manager-node \
+  --node-id   node-0 \
+  --grpc-port 9090 \
+  --exe       ./tigerbeetle \
+  --backup-config-file ./backup_config.toml \
+  -- start \
+    --addresses=3000 \
+    ./data/0_0.tigerbeetle
+
+# Node 1 — CDC consumer (separate terminal / container)
+tb-manager-node \
+  --node-id   cdc-node-0 \
+  --grpc-port 9091 \
+  --exe       ./tigerbeetle \
+  -- amqp \
+    --addresses=127.0.0.1:3000 \
+    --cluster=0 \
+    --host=127.0.0.1 \
+    --vhost=/ \
+    --user=guest --password=guest \
+    --publish-exchange=tigerbeetle
+```
+
+> **Note:** The `amqp` process connects to an already-running TigerBeetle
+> cluster — start the `node-0` (`start`) process first.
+
+### AMQP flags reference
+
+| Flag                 | Description                                              |
+|----------------------|----------------------------------------------------------|
+| `--addresses`        | Comma-separated `host:port` list of TigerBeetle replicas |
+| `--cluster`          | Cluster ID (must match the running cluster)              |
+| `--host`             | RabbitMQ host                                            |
+| `--port`             | RabbitMQ port (default: 5672)                            |
+| `--vhost`            | RabbitMQ virtual host (default: `/`)                     |
+| `--user`             | RabbitMQ username                                        |
+| `--password`         | RabbitMQ password                                        |
+| `--publish-exchange` | Exchange name to publish events to                       |
 
 ## Development
 
@@ -197,17 +283,12 @@ Required permissions: `s3:PutObject` on the backup bucket.
 
 MIT/Apache-2.0
 
-cd /Users/tiktuzki/Desktop/repos/personal/tigerbeetle/tigerbeetle-manager/crates/manager-server && \
-cargo run --release -- \
---exe /Users/tiktuzki/Desktop/repos/personal/tigerbeetle/.zig-cache/o/025b6d2171dded34c6053b65aaf1149a/tigerbeetle \
---port 8080 \
--- start --addresses=3000 ../../data/0_0.tigerbeetle
-
+```shell
 cargo run --bin tb-manager-node -- \
---backup-config-file ./backup_config.toml \
 --exe tigerbeetle \
 -- start --addresses=3000 \
 /Users/tiktuzki/Desktop/repos/ewallet/core-ledger-ms/compose/data/tigerbeetle-data/0_0.tigerbeetle
+```
 
 Forest = ForestType(
 Storage, .{                                                                                                                                                                                                         

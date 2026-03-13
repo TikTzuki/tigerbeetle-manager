@@ -205,7 +205,7 @@ impl ManagerNode for ManagerNodeService {
         // the first scheduled interval.
         self.spawn_immediate_backup();
 
-        debug!("Backups enabled with schedule '{}'", req.cron_schedule);
+        info!("Backups enabled with schedule '{}'", req.cron_schedule);
         Ok(Response::new(StartBackupResponse {
             success: true,
             message: format!(
@@ -352,7 +352,7 @@ impl ManagerNode for ManagerNodeService {
             }
         }
 
-        debug!("Backup config updated at {:?}", config_path);
+        info!("Backup config updated at {:?}", config_path);
         Ok(Response::new(ModifyBackupConfigResponse {
             success: true,
             message: format!("Backup config saved to {:?}", config_path),

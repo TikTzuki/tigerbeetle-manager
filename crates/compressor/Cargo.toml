@@ -14,7 +14,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 # TigerBeetle client
-tigerbeetle-unofficial = "0.14.23+0.16.74"
+tigerbeetle-unofficial = "=0.14.17+0.16.67"
 
 [lints]
 workspace = true

@@ -1,7 +1,7 @@
 import {z} from "zod";
 import {protectedProcedure, publicProcedure, router} from "@/server/trpc";
 import {cookies} from "next/headers";
-import {getNodeConfigs} from "@/server/nodes";
+import {getClusterConfigs, getNodeConfigs} from "@/server/nodes";
 import {
     getMigrationAccounts,
     getMigrationSyntheticTransfers,
@@ -54,30 +54,71 @@ export const managerRouter = router({
         };
     }),
 
-    // Get status of all nodes (fan-out gRPC calls).
-    getClusterStatus: protectedProcedure.query(async () => {
-        const nodes = getNodeConfigs();
-        const results = await Promise.allSettled(
-            nodes.map(async (node) => {
-                try {
-                    const status = await getNodeStatus(node.host, node.port);
-                    return {...node, status, online: true as const};
-                } catch {
-                    return {...node, status: null, online: false as const};
-                }
-            })
-        );
-
-        return results.map((r) =>
-            r.status === "fulfilled" ? r.value : {
-                id: "unknown",
-                host: "",
-                port: 0,
-                status: null,
-                online: false as const
-            }
-        );
+    // List all configured clusters (id + node count).
+    getClusters: protectedProcedure.query(() => {
+        return getClusterConfigs().map((c) => ({
+            id: c.id,
+            nodeCount: c.nodes.length,
+        }));
     }),
+
+    // Get status of all nodes in a specific cluster (fan-out gRPC calls).
+    getClusterStatus: protectedProcedure
+        .input(z.object({clusterId: z.string()}))
+        .query(async ({input}) => {
+            const clusters = getClusterConfigs();
+            const cluster = clusters.find((c) => c.id === input.clusterId);
+            const nodes = cluster ? cluster.nodes : [];
+            const results = await Promise.allSettled(
+                nodes.map(async (node) => {
+                    try {
+                        const status = await getNodeStatus(node.host, node.port);
+                        return {...node, status, online: true as const};
+                    } catch {
+                        return {...node, status: null, online: false as const};
+                    }
+                })
+            );
+
+            return results.map((r) =>
+                r.status === "fulfilled" ? r.value : {
+                    id: "unknown",
+                    host: "",
+                    port: 0,
+                    status: null,
+                    online: false as const
+                }
+            );
+        }),
+
+    // Fan-out to a cluster's nodes and return their TigerBeetle addresses for migration.
+    getClusterForMigration: protectedProcedure
+        .input(z.object({clusterId: z.string()}))
+        .query(async ({input}) => {
+            const clusters = getClusterConfigs();
+            const cluster = clusters.find((c) => c.id === input.clusterId);
+            if (!cluster) return {addresses: "", nodeCount: 0, onlineCount: 0};
+
+            const results = await Promise.allSettled(
+                cluster.nodes.map(async (node) => {
+                    const status = await getNodeStatus(node.host, node.port);
+                    const tbPort = status.process?.address;
+                    return tbPort ? `${node.host}:${tbPort}` : null;
+                })
+            );
+
+            const addresses = results
+                .filter((r): r is PromiseFulfilledResult<string> =>
+                    r.status === "fulfilled" && r.value !== null
+                )
+                .map((r) => r.value);
+
+            return {
+                addresses: addresses.join(","),
+                nodeCount: cluster.nodes.length,
+                onlineCount: addresses.length,
+            };
+        }),
 
     // Get status of a single node.
     getNodeStatus: protectedProcedure

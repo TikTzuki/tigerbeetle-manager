@@ -72,18 +72,29 @@ export default function Home() {
     const router = useRouter();
     const [secretKey, setSecretKey] = useState("");
     const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [activeClusterId, setActiveClusterId] = useState("");
 
     const checkAuth = trpc.manager.checkAuth.useQuery();
     const login = trpc.manager.login.useMutation();
     const logout = trpc.manager.logout.useMutation();
-    const cluster = trpc.manager.getClusterStatus.useQuery(undefined, {
+    const clustersQuery = trpc.manager.getClusters.useQuery(undefined, {
         enabled: isAuthenticated,
-        refetchInterval: 5000,
     });
+    const cluster = trpc.manager.getClusterStatus.useQuery(
+        {clusterId: activeClusterId},
+        {enabled: isAuthenticated && !!activeClusterId, refetchInterval: 5000},
+    );
 
     useEffect(() => {
         if (checkAuth.data?.isAuthenticated) setIsAuthenticated(true);
     }, [checkAuth.data]);
+
+    // Set the first cluster as active once clusters load.
+    useEffect(() => {
+        if (clustersQuery.data && clustersQuery.data.length > 0 && !activeClusterId) {
+            setActiveClusterId(clustersQuery.data[0].id);
+        }
+    }, [clustersQuery.data, activeClusterId]);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -134,6 +145,7 @@ export default function Home() {
 
     const nodes = cluster.data || [];
     const onlineCount = nodes.filter((n) => n.online).length;
+    const clusters = clustersQuery.data || [];
 
     return (
         <main className="min-h-screen bg-gray-50">
@@ -141,15 +153,36 @@ export default function Home() {
                 {/* Header */}
                 <div className="mb-6 flex items-center justify-between">
                     <div>
-                        <h1 className="text-2xl font-semibold">TigerBeetle Cluster</h1>
+                        <h1 className="text-2xl font-semibold">TigerBeetle Manager</h1>
                         <p className="text-sm text-gray-500">{onlineCount}/{nodes.length} nodes online</p>
                     </div>
-                    <button
-                        onClick={handleLogout}
-                        className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-50"
-                    >
-                        Sign out
-                    </button>
+                    <div className="flex items-center gap-3">
+                        {clusters.length > 1 && (
+                            <select
+                                value={activeClusterId}
+                                onChange={(e) => setActiveClusterId(e.target.value)}
+                                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
+                            >
+                                {clusters.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                        {c.id} ({c.nodeCount})
+                                    </option>
+                                ))}
+                            </select>
+                        )}
+                        {clusters.length === 1 && (
+                            <span
+                                className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600">
+                                {clusters[0].id}
+                            </span>
+                        )}
+                        <button
+                            onClick={handleLogout}
+                            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-50"
+                        >
+                            Sign out
+                        </button>
+                    </div>
                 </div>
 
                 {cluster.isLoading && (

@@ -25,11 +25,48 @@ function formatTs(ts: string): string {
 }
 
 
+function uint128ToUuid(id: string): string {
+    try {
+        const hex = BigInt(id).toString(16).padStart(32, "0");
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    } catch {
+        return id;
+    }
+}
+
 function formatBytes(bytes: number): string {
     if (bytes === 0) return "0 B";
     const units = ["B", "KB", "MB", "GB", "TB"];
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
     return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+function IdFormatToggle({format, onToggle}: { format: "uint128" | "uuid"; onToggle: () => void }) {
+    return (
+        <button
+            onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+            }}
+            className="ml-1 rounded border border-gray-300 px-1 py-0.5 text-[10px] font-normal text-gray-400 hover:border-gray-500 hover:text-gray-600"
+        >
+            {format === "uuid" ? "UUID" : "UInt128"}
+        </button>
+    );
+}
+
+function FlagsFormatToggle({format, onToggle}: { format: "hex" | "bin"; onToggle: () => void }) {
+    return (
+        <button
+            onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+            }}
+            className="ml-1 rounded border border-gray-300 px-1 py-0.5 text-[10px] font-normal text-gray-400 hover:border-gray-500 hover:text-gray-600"
+        >
+            {format === "hex" ? "0x" : "bin"}
+        </button>
+    );
 }
 
 function CopyButton({value}: { value: string }) {
@@ -498,14 +535,22 @@ interface TransferRecord {
     timestamp: string;
 }
 
-function AccountRows({accounts}: { accounts: AccountRecord[] }) {
+function AccountRows({accounts, idFormat = "uint128", flagsFmt = "hex"}: {
+    accounts: AccountRecord[];
+    idFormat?: "uint128" | "uuid";
+    flagsFmt?: "hex" | "bin";
+}) {
+    const fmtId = idFormat === "uuid" ? uint128ToUuid : (id: string) => id;
+    const fmtFlags = (f: number) => flagsFmt === "bin"
+        ? f.toString(2).padStart(16, "0").replace(/(.{4})/g, "$1 ").trim()
+        : `0x${f.toString(16).padStart(4, "0")}`;
     return (
         <>
             {accounts.map((a, i) => (
                 <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 font-mono text-gray-800" title={a.id}>
+                    <td className="px-3 py-1.5 font-mono text-gray-800" title={fmtId(a.id)}>
                         <div className="flex items-center gap-0.5 max-w-[14rem] min-w-0">
-                            <span className="truncate min-w-0">{a.id}</span><CopyButton value={a.id}/>
+                            <span className="truncate min-w-0">{fmtId(a.id)}</span><CopyButton value={fmtId(a.id)}/>
                         </div>
                     </td>
                     <td className="px-3 py-1.5 text-gray-600">{a.ledger}</td>
@@ -527,7 +572,7 @@ function AccountRows({accounts}: { accounts: AccountRecord[] }) {
                         {a.user_data_32 ? a.user_data_32 : <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-3 py-1.5 font-mono text-gray-500 text-xs">
-                        {a.flags ? `0x${a.flags.toString(16).padStart(4, "0")}` :
+                        {a.flags ? fmtFlags(a.flags) :
                             <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-3 py-1.5 text-gray-500 text-xs whitespace-nowrap">{formatTs(a.timestamp)}</td>
@@ -537,26 +582,37 @@ function AccountRows({accounts}: { accounts: AccountRecord[] }) {
     );
 }
 
-function TransferRows({transfers}: { transfers: TransferRecord[] }) {
+function TransferRows({transfers, idFmt = "uint128", debitFmt = "uint128", creditFmt = "uint128", flagsFmt = "hex"}: {
+    transfers: TransferRecord[];
+    idFmt?: "uint128" | "uuid";
+    debitFmt?: "uint128" | "uuid";
+    creditFmt?: "uint128" | "uuid";
+    flagsFmt?: "hex" | "bin";
+}) {
+    const fmtId = (id: string, fmt: "uint128" | "uuid") => fmt === "uuid" ? uint128ToUuid(id) : id;
+    const fmtFlags = (f: number) => flagsFmt === "bin"
+        ? f.toString(2).padStart(16, "0").replace(/(.{4})/g, "$1 ").trim()
+        : `0x${f.toString(16).padStart(4, "0")}`;
     return (
         <>
             {transfers.map((t, i) => (
                 <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 font-mono text-gray-800" title={t.id}>
+                    <td className="px-3 py-1.5 font-mono text-gray-800" title={fmtId(t.id, idFmt)}>
                         <div className="flex items-center gap-0.5 max-w-[14rem] min-w-0">
-                            <span className="truncate min-w-0">{t.id}</span><CopyButton value={t.id}/>
+                            <span className="truncate min-w-0">{fmtId(t.id, idFmt)}</span><CopyButton
+                            value={fmtId(t.id, idFmt)}/>
                         </div>
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-gray-600" title={t.debit_account_id}>
+                    <td className="px-3 py-1.5 font-mono text-gray-600" title={fmtId(t.debit_account_id, debitFmt)}>
                         <div className="flex items-center gap-0.5 max-w-[12rem] min-w-0">
-                            <span className="truncate min-w-0">{t.debit_account_id}</span><CopyButton
-                            value={t.debit_account_id}/>
+                            <span className="truncate min-w-0">{fmtId(t.debit_account_id, debitFmt)}</span><CopyButton
+                            value={fmtId(t.debit_account_id, debitFmt)}/>
                         </div>
                     </td>
-                    <td className="px-3 py-1.5 font-mono text-gray-600" title={t.credit_account_id}>
+                    <td className="px-3 py-1.5 font-mono text-gray-600" title={fmtId(t.credit_account_id, creditFmt)}>
                         <div className="flex items-center gap-0.5 max-w-[12rem] min-w-0">
-                            <span className="truncate min-w-0">{t.credit_account_id}</span><CopyButton
-                            value={t.credit_account_id}/>
+                            <span className="truncate min-w-0">{fmtId(t.credit_account_id, creditFmt)}</span><CopyButton
+                            value={fmtId(t.credit_account_id, creditFmt)}/>
                         </div>
                     </td>
                     <td className="px-3 py-1.5 font-mono text-gray-700 text-right">{t.amount}</td>
@@ -583,7 +639,7 @@ function TransferRows({transfers}: { transfers: TransferRecord[] }) {
                     <td className="px-3 py-1.5 text-gray-600">{t.ledger}</td>
                     <td className="px-3 py-1.5 text-gray-600">{t.code}</td>
                     <td className="px-3 py-1.5 font-mono text-gray-500 text-xs">
-                        {t.flags ? `0x${t.flags.toString(16).padStart(4, "0")}` :
+                        {t.flags ? fmtFlags(t.flags) :
                             <span className="text-gray-300">—</span>}
                     </td>
                     <td className="px-3 py-1.5 text-gray-500 text-xs whitespace-nowrap">{formatTs(t.timestamp)}</td>
@@ -594,7 +650,7 @@ function TransferRows({transfers}: { transfers: TransferRecord[] }) {
 }
 
 function RecordTable({headers, children, empty, loading}: {
-    headers: string[];
+    headers: React.ReactNode[];
     children: React.ReactNode;
     empty: boolean;
     loading?: boolean;
@@ -605,8 +661,8 @@ function RecordTable({headers, children, empty, loading}: {
         <div className="overflow-x-auto rounded border border-gray-200">
             <table className="w-full text-xs">
                 <thead className="bg-gray-50 sticky top-0">
-                <tr>{headers.map((h) => (
-                    <th key={h} className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">{h}</th>
+                <tr>{headers.map((h, i) => (
+                    <th key={i} className="px-3 py-2 text-left font-semibold text-gray-600 whitespace-nowrap">{h}</th>
                 ))}</tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">{children}</tbody>
@@ -645,12 +701,27 @@ function Pager({page, hasMore, onPrev, onNext, loading, count}: {
 function AccountsTable({nodeId}: { nodeId: string }) {
     const [lsmPage, setLsmPage] = useState(0);
     const [walPage, setWalPage] = useState(0);
+    const [idFormat, setIdFormat] = useState<"uint128" | "uuid">("uint128");
+    const [flagsFmt, setFlagsFmt] = useState<"hex" | "bin">("hex");
 
     const lsmQuery = trpc.manager.readLsmAccounts.useQuery({nodeId, page: lsmPage, limit: PAGE_LIMIT});
     const walQuery = trpc.manager.readWalAccounts.useQuery({nodeId, page: walPage, limit: PAGE_LIMIT});
 
     const lsmAccounts = (lsmQuery.data?.accounts ?? []) as AccountRecord[];
     const walAccounts = (walQuery.data?.accounts ?? []) as AccountRecord[];
+
+    const toggleIdFormat = () => setIdFormat((f) => f === "uint128" ? "uuid" : "uint128");
+    const accountHeaders: React.ReactNode[] = [
+        <span key="id" className="flex items-center">ID<IdFormatToggle format={idFormat}
+                                                                       onToggle={toggleIdFormat}/></span>,
+        "Ledger", "Code",
+        "Debits Pending", "Debits Posted",
+        "Credits Pending", "Credits Posted",
+        "User Data 128", "User Data 64", "User Data 32",
+        <span key="flags" className="flex items-center">Flags<FlagsFormatToggle format={flagsFmt}
+                                                                                onToggle={() => setFlagsFmt((f) => f === "hex" ? "bin" : "hex")}/></span>,
+        "Timestamp",
+    ];
 
     return (
         <div className="space-y-8">
@@ -666,9 +737,9 @@ function AccountsTable({nodeId}: { nodeId: string }) {
                 {lsmQuery.isError && (
                     <p className="rounded bg-red-50 p-2.5 text-sm text-red-700">{lsmQuery.error.message}</p>
                 )}
-                <RecordTable headers={ACCOUNT_HEADERS} empty={!lsmQuery.isLoading && lsmAccounts.length === 0}
+                <RecordTable headers={accountHeaders} empty={!lsmQuery.isLoading && lsmAccounts.length === 0}
                              loading={lsmQuery.isLoading}>
-                    <AccountRows accounts={lsmAccounts}/>
+                    <AccountRows accounts={lsmAccounts} idFormat={idFormat} flagsFmt={flagsFmt}/>
                 </RecordTable>
                 <Pager page={lsmPage} hasMore={lsmAccounts.length >= PAGE_LIMIT}
                        onPrev={() => setLsmPage((p) => p - 1)} onNext={() => setLsmPage((p) => p + 1)}
@@ -689,9 +760,9 @@ function AccountsTable({nodeId}: { nodeId: string }) {
                 {walQuery.isError && (
                     <p className="rounded bg-red-50 p-2.5 text-sm text-red-700">{walQuery.error.message}</p>
                 )}
-                <RecordTable headers={ACCOUNT_HEADERS} empty={!walQuery.isLoading && walAccounts.length === 0}
+                <RecordTable headers={accountHeaders} empty={!walQuery.isLoading && walAccounts.length === 0}
                              loading={walQuery.isLoading}>
-                    <AccountRows accounts={walAccounts}/>
+                    <AccountRows accounts={walAccounts} idFormat={idFormat} flagsFmt={flagsFmt}/>
                 </RecordTable>
                 <Pager page={walPage} hasMore={walAccounts.length >= PAGE_LIMIT}
                        onPrev={() => setWalPage((p) => p - 1)} onNext={() => setWalPage((p) => p + 1)}
@@ -704,12 +775,31 @@ function AccountsTable({nodeId}: { nodeId: string }) {
 function TransfersTable({nodeId}: { nodeId: string }) {
     const [lsmPage, setLsmPage] = useState(0);
     const [walPage, setWalPage] = useState(0);
+    const [idFmt, setIdFmt] = useState<"uint128" | "uuid">("uint128");
+    const [debitFmt, setDebitFmt] = useState<"uint128" | "uuid">("uint128");
+    const [creditFmt, setCreditFmt] = useState<"uint128" | "uuid">("uint128");
+    const [flagsFmt, setFlagsFmt] = useState<"hex" | "bin">("hex");
 
     const lsmQuery = trpc.manager.readLsmTransfers.useQuery({nodeId, page: lsmPage, limit: PAGE_LIMIT});
     const walQuery = trpc.manager.readWalTransfers.useQuery({nodeId, page: walPage, limit: PAGE_LIMIT});
 
     const lsmTransfers = (lsmQuery.data?.transfers ?? []) as TransferRecord[];
     const walTransfers = (walQuery.data?.transfers ?? []) as TransferRecord[];
+
+    const transferHeaders: React.ReactNode[] = [
+        <span key="id" className="flex items-center">ID<IdFormatToggle format={idFmt}
+                                                                       onToggle={() => setIdFmt((f) => f === "uint128" ? "uuid" : "uint128")}/></span>,
+        <span key="debit" className="flex items-center">Debit Account<IdFormatToggle format={debitFmt}
+                                                                                     onToggle={() => setDebitFmt((f) => f === "uint128" ? "uuid" : "uint128")}/></span>,
+        <span key="credit" className="flex items-center">Credit Account<IdFormatToggle format={creditFmt}
+                                                                                       onToggle={() => setCreditFmt((f) => f === "uint128" ? "uuid" : "uint128")}/></span>,
+        "Amount", "Pending ID",
+        "User Data 128", "User Data 64", "User Data 32",
+        "Timeout", "Ledger", "Code",
+        <span key="flags" className="flex items-center">Flags<FlagsFormatToggle format={flagsFmt}
+                                                                                onToggle={() => setFlagsFmt((f) => f === "hex" ? "bin" : "hex")}/></span>,
+        "Timestamp",
+    ];
 
     return (
         <div className="space-y-8">
@@ -726,9 +816,10 @@ function TransfersTable({nodeId}: { nodeId: string }) {
                 {lsmQuery.isError && (
                     <p className="rounded bg-red-50 p-2.5 text-sm text-red-700">{lsmQuery.error.message}</p>
                 )}
-                <RecordTable headers={TRANSFER_HEADERS} empty={!lsmQuery.isLoading && lsmTransfers.length === 0}
+                <RecordTable headers={transferHeaders} empty={!lsmQuery.isLoading && lsmTransfers.length === 0}
                              loading={lsmQuery.isLoading}>
-                    <TransferRows transfers={lsmTransfers}/>
+                    <TransferRows transfers={lsmTransfers} idFmt={idFmt} debitFmt={debitFmt} creditFmt={creditFmt}
+                                  flagsFmt={flagsFmt}/>
                 </RecordTable>
                 <Pager page={lsmPage} hasMore={lsmTransfers.length >= PAGE_LIMIT}
                        onPrev={() => setLsmPage((p) => p - 1)} onNext={() => setLsmPage((p) => p + 1)}
@@ -749,9 +840,10 @@ function TransfersTable({nodeId}: { nodeId: string }) {
                 {walQuery.isError && (
                     <p className="rounded bg-red-50 p-2.5 text-sm text-red-700">{walQuery.error.message}</p>
                 )}
-                <RecordTable headers={TRANSFER_HEADERS} empty={!walQuery.isLoading && walTransfers.length === 0}
+                <RecordTable headers={transferHeaders} empty={!walQuery.isLoading && walTransfers.length === 0}
                              loading={walQuery.isLoading}>
-                    <TransferRows transfers={walTransfers}/>
+                    <TransferRows transfers={walTransfers} idFmt={idFmt} debitFmt={debitFmt} creditFmt={creditFmt}
+                                  flagsFmt={flagsFmt}/>
                 </RecordTable>
                 <Pager page={walPage} hasMore={walTransfers.length >= PAGE_LIMIT}
                        onPrev={() => setWalPage((p) => p - 1)} onNext={() => setWalPage((p) => p + 1)}
@@ -765,59 +857,187 @@ function TransfersTable({nodeId}: { nodeId: string }) {
 // Live log stream
 // ---------------------------------------------------------------------------
 
+interface ParsedLogEntry {
+    timestamp: string;
+    level: string;
+    message: string;
+    error?: string;
+    raw?: string; // fallback if JSON parse fails
+}
+
+const LOG_LEVEL_COLOR: Record<string, string> = {
+    error: "text-red-400",
+    err: "text-red-400",
+    warn: "text-yellow-400",
+    warning: "text-yellow-400",
+    info: "text-blue-400",
+    debug: "text-gray-500",
+    trace: "text-gray-600",
+};
+
+const LOG_LEVEL_ROW_BG: Record<string, string> = {
+    error: "bg-red-950/40",
+    err: "bg-red-950/40",
+    warn: "bg-yellow-950/30",
+    warning: "bg-yellow-950/30",
+};
+
 function LogStream({nodeId}: { nodeId: string }) {
-    const [lines, setLines] = useState<string[]>([]);
+    const [entries, setEntries] = useState<ParsedLogEntry[]>([]);
     const [connected, setConnected] = useState(false);
     const [paused, setPaused] = useState(false);
+    const [levelFilter, setLevelFilter] = useState("all");
+    const [tail, setTail] = useState(100);
+    const [search, setSearch] = useState("");
     const bottomRef = useRef<HTMLDivElement>(null);
     const pausedRef = useRef(false);
+    const autoScrollRef = useRef(true);
     pausedRef.current = paused;
 
     useEffect(() => {
-        const es = new EventSource(`/api/logs/${nodeId}`);
+        setEntries([]);
+        setConnected(false);
+        const es = new EventSource(`/api/logs/${nodeId}?tail=${tail}`);
         es.onopen = () => setConnected(true);
-        es.onmessage = (e) => {
-            if (!pausedRef.current) {
-                setLines((prev) => {
-                    const next = [...prev, e.data];
-                    return next.length > 500 ? next.slice(-500) : next;
-                });
+        es.onmessage = (e: MessageEvent) => {
+            if (pausedRef.current) return;
+            let entry: ParsedLogEntry;
+            try {
+                entry = JSON.parse(e.data as string) as ParsedLogEntry;
+            } catch {
+                entry = {timestamp: "", level: "", message: e.data as string, raw: e.data as string};
             }
+            setEntries((prev) => {
+                const next = [...prev, entry];
+                return next.length > 2000 ? next.slice(-2000) : next;
+            });
         };
         es.onerror = () => setConnected(false);
         return () => es.close();
-    }, [nodeId]);
+    }, [nodeId, tail]);
 
+    // Auto-scroll when new entries arrive (unless user scrolled up).
     useEffect(() => {
-        if (!paused) bottomRef.current?.scrollIntoView({behavior: "smooth"});
-    }, [lines, paused]);
+        if (autoScrollRef.current) {
+            bottomRef.current?.scrollIntoView({behavior: "smooth"});
+        }
+    }, [entries]);
+
+    const filtered = entries.filter((e) => {
+        const level = (e.level ?? "").toLowerCase();
+        if (levelFilter !== "all" && level !== levelFilter) return false;
+        if (search && !e.message?.toLowerCase().includes(search.toLowerCase())) return false;
+        return true;
+    });
 
     return (
         <div className="space-y-2">
-            <div className="flex items-center gap-3">
-                <span className={`inline-block h-2 w-2 rounded-full ${connected ? "bg-green-500" : "bg-red-400"}`}/>
-                <span className="text-sm text-gray-500">{connected ? "Connected" : "Disconnected"}</span>
+            {/* Toolbar */}
+            <div className="flex flex-wrap items-center gap-2">
+                <span
+                    className={`inline-block h-2 w-2 shrink-0 rounded-full ${connected ? "bg-green-500" : "bg-red-400"}`}/>
+                <span className="text-sm text-gray-500 shrink-0">{connected ? "Live" : "Disconnected"}</span>
+
+                <select
+                    value={levelFilter}
+                    onChange={(e) => setLevelFilter(e.target.value)}
+                    className="rounded border border-gray-200 bg-white px-2 py-1 text-xs focus:outline-none"
+                >
+                    <option value="all">All levels</option>
+                    <option value="error">Error</option>
+                    <option value="warn">Warn</option>
+                    <option value="info">Info</option>
+                    <option value="debug">Debug</option>
+                    <option value="trace">Trace</option>
+                </select>
+
+                <select
+                    value={tail}
+                    onChange={(e) => setTail(parseInt(e.target.value, 10))}
+                    className="rounded border border-gray-200 bg-white px-2 py-1 text-xs focus:outline-none"
+                >
+                    <option value={50}>Last 50</option>
+                    <option value={100}>Last 100</option>
+                    <option value={200}>Last 200</option>
+                    <option value={500}>Last 500</option>
+                </select>
+
+                <input
+                    type="text"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Filter messages…"
+                    className="rounded border border-gray-200 px-2 py-1 text-xs focus:border-gray-400 focus:outline-none w-40"
+                />
+
+                <span className="ml-auto text-xs text-gray-400 shrink-0">
+                    {filtered.length}/{entries.length} lines
+                    {paused && <span className="ml-1 text-amber-500">paused</span>}
+                </span>
+
                 <button
                     onClick={() => setPaused((v) => !v)}
-                    className="ml-auto rounded border border-gray-200 px-3 py-1 text-xs hover:bg-gray-50"
+                    className={`rounded border px-3 py-1 text-xs hover:bg-gray-50 ${paused ? "border-amber-300 text-amber-600" : "border-gray-200"}`}
                 >
                     {paused ? "Resume" : "Pause"}
                 </button>
                 <button
-                    onClick={() => setLines([])}
+                    onClick={() => setEntries([])}
                     className="rounded border border-gray-200 px-3 py-1 text-xs hover:bg-gray-50"
                 >
                     Clear
                 </button>
             </div>
+
+            {/* Log viewport */}
             <div
-                className="h-80 overflow-y-auto rounded border border-gray-200 bg-gray-950 p-3 font-mono text-xs text-gray-300">
-                {lines.length === 0 ? (
-                    <p className="text-gray-600">Waiting for log output…</p>
+                onScroll={(e) => {
+                    const el = e.currentTarget;
+                    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+                }}
+                className="h-[32rem] overflow-y-auto rounded border border-gray-800 bg-gray-950 font-mono text-xs"
+            >
+                {filtered.length === 0 ? (
+                    <p className="p-4 text-gray-600">
+                        {connected ? (entries.length === 0 ? "Waiting for log output…" : "No lines match the current filter.") : "Connecting…"}
+                    </p>
                 ) : (
-                    lines.map((line, i) => (
-                        <div key={i} className="leading-5 whitespace-pre-wrap break-all">{line}</div>
-                    ))
+                    <table className="w-full border-collapse">
+                        <tbody>
+                        {filtered.map((entry, i) => {
+                            const level = (entry.level ?? "").toLowerCase();
+                            const levelColor = LOG_LEVEL_COLOR[level] ?? "text-gray-400";
+                            const rowBg = LOG_LEVEL_ROW_BG[level] ?? "";
+                            const ts = entry.timestamp
+                                ? (() => {
+                                    try {
+                                        return new Date(entry.timestamp).toISOString().slice(11, 23);
+                                    } catch {
+                                        return entry.timestamp;
+                                    }
+                                })()
+                                : "";
+                            return (
+                                <tr key={i} className={`leading-5 hover:bg-white/5 ${rowBg}`}>
+                                    {ts && (
+                                        <td className="px-3 py-0.5 text-gray-600 whitespace-nowrap align-top select-none w-[7rem]">
+                                            {ts}
+                                        </td>
+                                    )}
+                                    <td className={`px-1 py-0.5 uppercase align-top whitespace-nowrap select-none w-10 ${levelColor}`}>
+                                        {(entry.level ?? "?").slice(0, 5)}
+                                    </td>
+                                    <td className="px-3 py-0.5 text-gray-200 break-all whitespace-pre-wrap align-top">
+                                        {entry.message ?? entry.raw ?? ""}
+                                        {entry.error && (
+                                            <span className="ml-2 text-red-400">{entry.error}</span>
+                                        )}
+                                    </td>
+                                </tr>
+                            );
+                        })}
+                        </tbody>
+                    </table>
                 )}
                 <div ref={bottomRef}/>
             </div>
@@ -883,6 +1103,7 @@ function MigratePanel({nodeId}: { nodeId: string }) {
     );
     const [newClusterId, setNewClusterId] = useState("");
     const [newAddresses, setNewAddresses] = useState("");
+    const [targetClusterId, setTargetClusterId] = useState("");
     const [migrating, setMigrating] = useState(false);
     const [progress, setProgress] = useState<MigrationProgressEvent[]>([]);
     const [migrationDone, setMigrationDone] = useState(false);
@@ -907,6 +1128,20 @@ function MigratePanel({nodeId}: { nodeId: string }) {
         {nodeId, page: detailPage, limit: DETAIL_LIMIT},
         {enabled: activeDetail === "transfers"}
     );
+
+    // Configured clusters for migration target selection.
+    const clustersQuery = trpc.manager.getClusters.useQuery();
+    const clusterAddrQuery = trpc.manager.getClusterForMigration.useQuery(
+        {clusterId: targetClusterId},
+        {enabled: !!targetClusterId}
+    );
+
+    // Auto-populate addresses when a cluster is selected.
+    useEffect(() => {
+        if (clusterAddrQuery.data?.addresses) {
+            setNewAddresses(clusterAddrQuery.data.addresses);
+        }
+    }, [clusterAddrQuery.data]);
 
     const runPreflight = () => {
         planQuery.refetch();
@@ -1294,28 +1529,78 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                     The new cluster must be formatted and running before executing.
                 </p>
 
-                <div className="mb-4 grid gap-3 sm:grid-cols-2">
-                    <div>
-                        <label className="mb-1 block text-xs font-medium text-gray-700">New Cluster ID</label>
-                        <input
-                            type="number"
-                            value={newClusterId}
-                            onChange={(e) => setNewClusterId(e.target.value)}
-                            placeholder="0"
-                            disabled={migrating}
-                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
-                        />
+                <div className="mb-4 space-y-3">
+                    {/* Target cluster selector */}
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        <div>
+                            <label className="mb-1 block text-xs font-medium text-gray-700">Target Cluster</label>
+                            <select
+                                value={targetClusterId}
+                                onChange={(e) => {
+                                    setTargetClusterId(e.target.value);
+                                    setNewAddresses("");
+                                }}
+                                disabled={migrating}
+                                className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                            >
+                                <option value="">— select a cluster —</option>
+                                {(clustersQuery.data ?? []).map((c) => (
+                                    <option key={c.id} value={c.id}>{c.id} ({c.nodeCount} nodes)</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="mb-1 block text-xs font-medium text-gray-700">
+                                TigerBeetle Cluster ID
+                                <span className="ml-1 text-gray-400 font-normal">(numeric)</span>
+                            </label>
+                            <input
+                                type="number"
+                                value={newClusterId}
+                                onChange={(e) => setNewClusterId(e.target.value)}
+                                placeholder="0"
+                                disabled={migrating}
+                                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                            />
+                        </div>
                     </div>
+
+                    {/* Addresses — auto-populated from selected cluster */}
                     <div>
-                        <label className="mb-1 block text-xs font-medium text-gray-700">New Cluster Addresses</label>
+                        <div className="mb-1 flex items-center justify-between">
+                            <label className="text-xs font-medium text-gray-700">
+                                TigerBeetle Addresses
+                                {targetClusterId && clusterAddrQuery.isFetching && (
+                                    <span className="ml-2 text-gray-400 font-normal">fetching…</span>
+                                )}
+                                {targetClusterId && clusterAddrQuery.data && !clusterAddrQuery.isFetching && (
+                                    <span className="ml-2 font-normal text-green-600">
+                                        {clusterAddrQuery.data.onlineCount}/{clusterAddrQuery.data.nodeCount} nodes online
+                                    </span>
+                                )}
+                            </label>
+                            {targetClusterId && (
+                                <button
+                                    type="button"
+                                    onClick={() => clusterAddrQuery.refetch()}
+                                    disabled={clusterAddrQuery.isFetching || migrating}
+                                    className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40"
+                                >
+                                    Refresh
+                                </button>
+                            )}
+                        </div>
                         <input
                             type="text"
                             value={newAddresses}
                             onChange={(e) => setNewAddresses(e.target.value)}
-                            placeholder="h1:3000,h2:3000,h3:3000,h4:3000,h5:3000,h6:3000"
+                            placeholder={targetClusterId ? "Fetching addresses…" : "Select a cluster above, or enter manually: h1:3000,h2:3000"}
                             disabled={migrating}
-                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
                         />
+                        <p className="mt-0.5 text-xs text-gray-400">
+                            Auto-filled from target cluster nodes. You can edit manually if needed.
+                        </p>
                     </div>
                 </div>
 

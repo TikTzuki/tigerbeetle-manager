@@ -81,49 +81,6 @@ zig build run -- format --cluster=0 --replica=0 --replica-count=1 \
 
 **Important**: Data file version must match TigerBeetle binary version. Version mismatches will cause startup failures.
 
-### Run Backend (Manager Server)
-
-```bash
-cd tigerbeetle-manager
-
-# Run with cron backups (every 5 minutes example)
-cargo run --bin tigerbeetle-manager-server -- \
-  --exe ../zig-out/bin/tigerbeetle \
-  --cron-schedule "*/5 * * * *" \
-  --backup-file ./data/0_0.tigerbeetle \
-  --bucket tigerbeetle-backups \
-  --port 8080 \
-  -- start --addresses=3000 ./data/0_0.tigerbeetle
-
-# Or without automated backups
-cargo run --bin tigerbeetle-manager-server -- \
-  --exe ../zig-out/bin/tigerbeetle \
-  --backup-file ./data/0_0.tigerbeetle \
-  --bucket tigerbeetle-backups \
-  --port 8080 \
-  -- start --addresses=3000 ./data/0_0.tigerbeetle
-```
-
-REST API will be available at:
-
-- `GET http://localhost:8080/status` — Manager status
-- `POST http://localhost:8080/backup/start` — Start backup job
-- `POST http://localhost:8080/backup/stop` — Stop backup job
-
-### Run Frontend
-
-```bash
-cd tigerbeetle-manager-fe
-
-# Install dependencies (first time)
-npm install
-
-# Run dev server
-npm run dev
-```
-
-Frontend will be available at http://localhost:3000
-
 ## Cron Scheduling
 
 ### Timezone: UTC Only
@@ -188,7 +145,6 @@ cargo build --release
 cargo test
 
 # Run specific binary
-cargo run --bin tigerbeetle-manager-server -- [args]
 cargo run --example read-accounts
 
 # Check formatting
@@ -279,9 +235,10 @@ error: subcommand required, expected 'format', 'recover', 'start', 'version'...
 **Fix**: Add TigerBeetle arguments after `--`:
 
 ```bash
-cargo run --bin tigerbeetle-manager-server -- \
-  --exe tigerbeetle \
-  -- start --addresses=3000 ./data/0_0.tigerbeetle
+ cargo run --bin tb-manager-node -- \
+--exe tigerbeetle \
+-- start --addresses=3000 \
+data/0_0.tigerbeetle
 ```
 
 ### Cron Schedule Not Working
