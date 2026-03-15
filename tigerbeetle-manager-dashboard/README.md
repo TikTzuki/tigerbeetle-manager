@@ -1,59 +1,106 @@
-# Next.js 16 + tRPC + Tailwind CSS Template
+# TigerBeetle Manager Dashboard
 
-A boilerplate project using Next.js 16 (App Router), tRPC v11, TanStack React Query, Tailwind CSS v4, and Drizzle ORM.
+Web dashboard for managing TigerBeetle database clusters. Communicates with
+[tigerbeetle-manager-node](../crates/manager-node/) instances via gRPC.
 
-## Getting Started
+## Features
 
-1. Install dependencies:
+- **Cluster Overview** — Auto-discovers clusters by reading `cluster_id` from each node's
+  superblock. Groups nodes by cluster, shows online/offline status with 5-second polling.
+- **Node Status** — Process state, PID, uptime, replica index, data file capacity with color-coded
+  usage bar.
+- **Backup Management** — Start/stop cron-scheduled S3 backups, trigger immediate backups, configure
+  AWS credentials. Supports 6-field cron patterns (sec min hour dom mon dow) with preset shortcuts.
+- **Account Browser** — Paginated browsing of accounts from both LSM (checkpointed) and WAL
+  (pre-checkpoint) sources. ID format toggle (UInt128 / UUID), flags format toggle (hex / binary),
+  copy-to-clipboard.
+- **Transfer Browser** — Same dual-source browsing for transfers with per-column format toggles.
+- **Log Streaming** — Real-time SSE log stream with level filtering, text search, pause/resume,
+  and auto-scroll.
+- **Migration** — Two-step cluster migration: read-only pre-flight check with drill-down into
+  accounts, ledger summaries, and synthetic transfers, then streaming execution with live progress
+  bar. Supports time-window migration with cutoff date for partial transfer replay.
+
+## Quick Start
 
 ```bash
+# Install dependencies
 npm install
-```
 
-2. Copy the environment file:
-
-```bash
+# Copy environment file and set your admin secret
 cp .env.example .env
-```
 
-3. Start the development server:
-
-```bash
+# Start development server
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3000](http://localhost:3000) and sign in with your `ADMIN_SECRET_KEY`.
+
+## Prerequisites
+
+Each TigerBeetle instance must be managed by a
+[tigerbeetle-manager-node](../crates/manager-node/) process exposing a gRPC port:
+
+```bash
+# Start a manager node (one per TigerBeetle instance)
+cargo run --bin tb-manager-node -- \
+  --grpc-port 9090 \
+  --exe ./tigerbeetle \
+  --backup-config-file ./backup_config.toml \
+  -- start --addresses=3000 ./data/0_0.tigerbeetle
+```
+
+The dashboard connects to these manager nodes via the `MANAGER_NODES` environment variable:
+
+```bash
+# Multi-node setup
+MANAGER_NODES=10.0.0.1:9090,10.0.0.2:9090,10.0.0.3:9090
+
+# Default (no env var): 6 nodes on localhost:9090-9095
+```
+
+Node IDs and cluster membership are discovered automatically from each node's superblock.
+
+## Environment Variables
+
+| Variable              | Required | Default                 | Description                                 |
+|-----------------------|----------|-------------------------|---------------------------------------------|
+| `ADMIN_SECRET_KEY`    | Yes      | —                       | Admin password for dashboard login.         |
+| `MANAGER_NODES`       | No       | `localhost:9090`–`9095` | Comma-separated `host:port` gRPC addresses. |
+| `NEXT_PUBLIC_APP_URL` | No       | `http://localhost:3000` | Base URL for tRPC SSR.                      |
 
 ## Project Structure
 
 ```
-eslint.config.mjs          # ESLint flat config
-next.config.ts             # Next.js configuration
 src/
-  app/                     # Next.js App Router pages and layouts
-    api/trpc/[trpc]/       # tRPC API route handler
-    globals.css            # Global styles (Tailwind CSS)
-    layout.tsx             # Root layout with TRPCProvider
-    page.tsx               # Landing page
-  server/                  # Server-side code
-    trpc.ts                # tRPC initialization
-    routers/
-      root.ts              # Root router (merges all sub-routers)
-      example.ts           # Example router with hello procedure
-  trpc/                    # Client-side tRPC setup
-    client.ts              # tRPC React hooks
-    provider.tsx           # TRPCProvider with QueryClient
+  app/
+    page.tsx                        # Login + cluster overview
+    nodes/[nodeId]/page.tsx         # Node detail (6 tabs)
+    api/
+      trpc/[trpc]/route.ts         # tRPC handler
+      logs/[nodeId]/route.ts        # SSE log stream
+      migration/execute/route.ts    # SSE migration progress
+  server/
+    nodes.ts                        # Node config (MANAGER_NODES parser)
+    grpc-client.ts                  # gRPC client (proto at ../proto/manager.proto)
+    routers/manager.ts              # tRPC procedures (auth, nodes, backup, data, migration)
+    trpc.ts                         # tRPC init + auth middleware
+  trpc/
+    client.ts                       # Client hooks
+    provider.tsx                    # React Query + tRPC provider
 ```
 
 ## Scripts
 
-- `npm run dev` -- Start the development server (Turbopack)
-- `npm run build` -- Build for production (Turbopack)
-- `npm start` -- Start the production server
-- `npm run lint` -- Run ESLint
+| Command         | Description                          |
+|-----------------|--------------------------------------|
+| `npm run dev`   | Development server with Turbopack    |
+| `npm run build` | Production build (standalone output) |
+| `npm run start` | Start production server              |
+| `npm run lint`  | Run ESLint                           |
 
-## Adding New Procedures
+## Related
 
-1. Create a new router in `src/server/routers/`.
-2. Merge it into the root router in `src/server/routers/root.ts`.
-3. Use it on the client with `trpc.yourRouter.yourProcedure.useQuery()`.
+- [tigerbeetle-manager](../) — Parent project with Rust crates
+- [manager.proto](../proto/manager.proto) — gRPC service definition
+- [tigerbeetle-manager-node](../crates/manager-node/) — Per-node gRPC server

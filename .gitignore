@@ -7,3 +7,4 @@ target
 .nvim
 .env
 backup_config.toml
+tigerbeetle
