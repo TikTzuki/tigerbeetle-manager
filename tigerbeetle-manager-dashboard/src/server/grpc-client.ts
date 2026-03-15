@@ -48,6 +48,11 @@ export interface NodeStatus {
     backup: BackupStatus;
     uptime_seconds: string;
     capacity: DataFileCapacity | null;
+    cluster_id: string;
+    /** Zero-based replica index. -1 if unreadable/unformatted. */
+    replica: number;
+    /** Total replica count (1–6). 0 if unreadable. */
+    replica_count: number;
 }
 
 export interface GrpcResponse {
@@ -350,6 +355,7 @@ export interface PlanMigrationResponse {
     ledgers: number;
     ledger_summaries: LedgerSummary[];
     pending_accounts: AccountRecord[];
+    windowed_transfers: string;
 }
 
 export interface LedgerSummary {
@@ -381,11 +387,14 @@ export interface MigrationAccountFilter {
 
 export async function planMigration(
     host: string,
-    port: number
+    port: number,
+    cutoffTs?: string
 ): Promise<PlanMigrationResponse> {
     const client = createClient(`${host}:${port}`);
     try {
-        return await promisify<PlanMigrationResponse>(client, "PlanMigration", {});
+        return await promisify<PlanMigrationResponse>(client, "PlanMigration", {
+            cutoff_ts: cutoffTs ?? "0",
+        });
     } finally {
         client.close();
     }
@@ -440,8 +449,9 @@ export interface MigrationProgress {
 export interface ExecuteMigrationOptions {
     host: string;
     port: number;
-    newClusterId: number;
+    newClusterId: string;
     newAddresses: string;
+    cutoffTs?: string;
     onProgress: (progress: MigrationProgress) => void;
     onError?: (err: Error) => void;
     onEnd?: () => void;
@@ -452,6 +462,7 @@ export function executeMigration(options: ExecuteMigrationOptions): () => void {
     const stream = client.ExecuteMigration({
         new_cluster_id: options.newClusterId,
         new_addresses: options.newAddresses,
+        cutoff_ts: options.cutoffTs ?? "0",
     });
 
     stream.on("data", (progress: MigrationProgress) => {

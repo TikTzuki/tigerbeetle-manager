@@ -20,6 +20,11 @@ function formatBytes(bytes: number): string {
     return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
+function shortenClusterId(id: string): string {
+    if (id.length <= 16) return id;
+    return `${id.slice(0, 8)}…${id.slice(-6)}`;
+}
+
 function CapacityBar({capacity}: {
     capacity: { data_file_size_bytes: string; grid_blocks_total: string; grid_blocks_used: string } | null
 }) {
@@ -68,33 +73,102 @@ function ProcessStateBadge({state}: { state: string }) {
     );
 }
 
-export default function Home() {
+type NodeEntry = {
+    id: string;
+    host: string;
+    port: number;
+    online: boolean;
+    status: {
+        cluster_id?: string;
+        replica?: number;
+        replica_count?: number;
+        process?: { state: string; address: string };
+        backup?: { enabled: boolean; cron_schedule: string };
+        uptime_seconds?: string | number;
+        capacity?: { data_file_size_bytes: string; grid_blocks_total: string; grid_blocks_used: string } | null;
+    } | null;
+};
+
+function NodeCard({node}: { node: NodeEntry }) {
     const router = useRouter();
+    return (
+        <button
+            onClick={() => router.push(`/nodes/${node.id}`)}
+            className={`rounded-lg border bg-white p-4 text-left transition-shadow hover:shadow-md focus:outline-none ${
+                node.online ? "border-gray-200" : "border-red-200 bg-red-50/50"
+            }`}
+        >
+            <div className="mb-3 flex items-center justify-between">
+                <div>
+                    <h3 className="font-mono text-sm font-semibold">
+                        Replica {node.status?.replica != null && node.status.replica >= 0
+                        ? node.status.replica
+                        : node.id}
+                    </h3>
+                    {node.status?.replica_count != null && node.status.replica_count > 0 && (
+                        <p className="text-xs text-gray-400">of {node.status.replica_count}</p>
+                    )}
+                </div>
+                {node.online ? (
+                    <span className="flex items-center gap-1 text-xs text-green-600">
+                        <span className="inline-block h-2 w-2 rounded-full bg-green-500"/>Online
+                    </span>
+                ) : (
+                    <span className="flex items-center gap-1 text-xs text-red-600">
+                        <span className="inline-block h-2 w-2 rounded-full bg-red-500"/>Offline
+                    </span>
+                )}
+            </div>
+
+            {!node.online && (
+                <p className="text-xs text-red-600">Cannot reach {node.host}:{node.port}</p>
+            )}
+
+            {node.online && node.status && (
+                <div className="space-y-1.5 text-xs">
+                    <div className="flex justify-between">
+                        <span className="text-gray-500">Process</span>
+                        <ProcessStateBadge
+                            state={node.status.process?.state || "PROCESS_STATE_UNKNOWN"}/>
+                    </div>
+                    <div className="flex justify-between">
+                        <span className="text-gray-500">Address</span>
+                        <span className="font-mono">:{node.status.process?.address || "—"}</span>
+                    </div>
+                    <div className="flex justify-between">
+                        <span className="text-gray-500">Uptime</span>
+                        <span>{formatUptime(node.status.uptime_seconds ?? 0)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                        <span className="text-gray-500">Backups</span>
+                        <span
+                            className={node.status.backup?.enabled ? "font-medium text-green-600" : "text-gray-400"}>
+                            {node.status.backup?.enabled ? `On · ${node.status.backup.cron_schedule}` : "Off"}
+                        </span>
+                    </div>
+                    <CapacityBar capacity={node.status.capacity ?? null}/>
+                    <p className="mt-2 text-center text-gray-400">Click to open →</p>
+                </div>
+            )}
+        </button>
+    );
+}
+
+export default function Home() {
     const [secretKey, setSecretKey] = useState("");
     const [isAuthenticated, setIsAuthenticated] = useState(false);
-    const [activeClusterId, setActiveClusterId] = useState("");
 
     const checkAuth = trpc.manager.checkAuth.useQuery();
     const login = trpc.manager.login.useMutation();
     const logout = trpc.manager.logout.useMutation();
-    const clustersQuery = trpc.manager.getClusters.useQuery(undefined, {
+    const allNodes = trpc.manager.getAllNodeStatuses.useQuery(undefined, {
         enabled: isAuthenticated,
+        refetchInterval: 5000,
     });
-    const cluster = trpc.manager.getClusterStatus.useQuery(
-        {clusterId: activeClusterId},
-        {enabled: isAuthenticated && !!activeClusterId, refetchInterval: 5000},
-    );
 
     useEffect(() => {
         if (checkAuth.data?.isAuthenticated) setIsAuthenticated(true);
     }, [checkAuth.data]);
-
-    // Set the first cluster as active once clusters load.
-    useEffect(() => {
-        if (clustersQuery.data && clustersQuery.data.length > 0 && !activeClusterId) {
-            setActiveClusterId(clustersQuery.data[0].id);
-        }
-    }, [clustersQuery.data, activeClusterId]);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -143,9 +217,24 @@ export default function Home() {
         );
     }
 
-    const nodes = cluster.data || [];
-    const onlineCount = nodes.filter((n) => n.online).length;
-    const clusters = clustersQuery.data || [];
+    const nodes: NodeEntry[] = allNodes.data || [];
+    const totalOnline = nodes.filter((n) => n.online).length;
+
+    // Group nodes by cluster_id. Nodes without a cluster_id go to "offline" section.
+    const clusterMap = new Map<string, NodeEntry[]>();
+    const offlineNodes: NodeEntry[] = [];
+
+    for (const node of nodes) {
+        const cid = node.status?.cluster_id;
+        if (cid) {
+            if (!clusterMap.has(cid)) clusterMap.set(cid, []);
+            clusterMap.get(cid)!.push(node);
+        } else {
+            offlineNodes.push(node);
+        }
+    }
+
+    const clusters = Array.from(clusterMap.entries());
 
     return (
         <main className="min-h-screen bg-gray-50">
@@ -154,99 +243,62 @@ export default function Home() {
                 <div className="mb-6 flex items-center justify-between">
                     <div>
                         <h1 className="text-2xl font-semibold">TigerBeetle Manager</h1>
-                        <p className="text-sm text-gray-500">{onlineCount}/{nodes.length} nodes online</p>
+                        <p className="text-sm text-gray-500">
+                            {totalOnline}/{nodes.length} nodes online
+                            · {clusters.length} cluster{clusters.length !== 1 ? "s" : ""}
+                        </p>
                     </div>
-                    <div className="flex items-center gap-3">
-                        {clusters.length > 1 && (
-                            <select
-                                value={activeClusterId}
-                                onChange={(e) => setActiveClusterId(e.target.value)}
-                                className="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900"
-                            >
-                                {clusters.map((c) => (
-                                    <option key={c.id} value={c.id}>
-                                        {c.id} ({c.nodeCount})
-                                    </option>
-                                ))}
-                            </select>
-                        )}
-                        {clusters.length === 1 && (
-                            <span
-                                className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600">
-                                {clusters[0].id}
-                            </span>
-                        )}
-                        <button
-                            onClick={handleLogout}
-                            className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-50"
-                        >
-                            Sign out
-                        </button>
-                    </div>
+                    <button
+                        onClick={handleLogout}
+                        className="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-50"
+                    >
+                        Sign out
+                    </button>
                 </div>
 
-                {cluster.isLoading && (
+                {allNodes.isLoading && (
                     <div className="rounded-lg border border-gray-200 bg-white p-8 text-center">
-                        <p className="text-sm text-gray-500">Connecting to cluster nodes...</p>
+                        <p className="text-sm text-gray-500">Connecting to nodes...</p>
                     </div>
                 )}
 
-                {/* Node grid */}
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                    {nodes.map((node) => (
-                        <button
-                            key={node.id}
-                            onClick={() => router.push(`/nodes/${node.id}`)}
-                            className={`rounded-lg border bg-white p-4 text-left transition-shadow hover:shadow-md focus:outline-none ${
-                                node.online ? "border-gray-200" : "border-red-200 bg-red-50/50"
-                            }`}
-                        >
-                            <div className="mb-3 flex items-center justify-between">
-                                <h3 className="font-mono text-sm font-semibold">{node.id}</h3>
-                                {node.online ? (
-                                    <span className="flex items-center gap-1 text-xs text-green-600">
-                                        <span className="inline-block h-2 w-2 rounded-full bg-green-500"/>Online
-                                    </span>
-                                ) : (
-                                    <span className="flex items-center gap-1 text-xs text-red-600">
-                                        <span className="inline-block h-2 w-2 rounded-full bg-red-500"/>Offline
-                                    </span>
-                                )}
+                {/* Clusters */}
+                {clusters.map(([clusterId, clusterNodes]) => {
+                    const onlineCount = clusterNodes.filter((n) => n.online).length;
+                    return (
+                        <div key={clusterId} className="mb-8">
+                            <div className="mb-3 flex items-center gap-3">
+                                <h2 className="font-mono text-sm font-semibold text-gray-700">
+                                    Cluster {shortenClusterId(clusterId)}
+                                </h2>
+                                <span
+                                    className="text-xs text-gray-400">{onlineCount}/{clusterNodes.length} online</span>
+                                <span className="font-mono text-xs text-gray-300" title={clusterId}>{clusterId}</span>
                             </div>
+                            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                                {clusterNodes.map((node) => (
+                                    <NodeCard key={node.id} node={node}/>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                })}
 
-                            {!node.online && (
-                                <p className="text-xs text-red-600">Cannot reach {node.host}:{node.port}</p>
-                            )}
-
-                            {node.online && node.status && (
-                                <div className="space-y-1.5 text-xs">
-                                    <div className="flex justify-between">
-                                        <span className="text-gray-500">Process</span>
-                                        <ProcessStateBadge
-                                            state={node.status.process?.state || "PROCESS_STATE_UNKNOWN"}/>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span className="text-gray-500">Address</span>
-                                        <span className="font-mono">:{node.status.process?.address || "—"}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span className="text-gray-500">Uptime</span>
-                                        <span>{formatUptime(node.status.uptime_seconds)}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span className="text-gray-500">Backups</span>
-                                        <span
-                                            className={node.status.backup?.enabled ? "font-medium text-green-600" : "text-gray-400"}>
-                                            {node.status.backup?.enabled ? `On · ${node.status.backup.cron_schedule}` : "Off"}
-                                        </span>
-                                    </div>
-                                    <CapacityBar capacity={node.status.capacity}/>
-                                    <p className="mt-2 text-center text-gray-400">Click to open →</p>
-                                </div>
-                            )}
-                        </button>
-                    ))}
-                </div>
+                {/* Offline / unreachable nodes (no cluster_id) */}
+                {offlineNodes.length > 0 && (
+                    <div className="mb-8">
+                        <div className="mb-3 flex items-center gap-3">
+                            <h2 className="text-sm font-semibold text-gray-500">Offline / Unreachable</h2>
+                            <span
+                                className="text-xs text-gray-400">{offlineNodes.length} node{offlineNodes.length !== 1 ? "s" : ""}</span>
+                        </div>
+                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                            {offlineNodes.map((node) => (
+                                <NodeCard key={node.id} node={node}/>
+                            ))}
+                        </div>
+                    </div>
+                )}
 
                 <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-3">
                     <p className="text-xs text-amber-900">

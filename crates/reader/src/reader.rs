@@ -16,6 +16,20 @@ use crate::types::{Account, Transfer, read_u32, read_u64};
 
 const RECORD_SIZE: usize = 128;
 
+/// Replica configuration read from the superblock.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplicaInfo {
+    /// 128-bit cluster ID set at format time (`--cluster=N`).
+    pub cluster_id: u128,
+    /// Zero-based replica index (position in the cluster's `members` array).
+    ///
+    /// `None` if `replica_id` is not found in `members` — should not happen for
+    /// a correctly formatted file.
+    pub replica: Option<u8>,
+    /// Total number of replicas in the cluster (`--replica-count=N`).
+    pub replica_count: u8,
+}
+
 /// Data file capacity statistics.
 #[derive(Debug, Clone)]
 pub struct CapacityStats {
@@ -150,6 +164,31 @@ impl DataFileReader {
             data_file_size_bytes: file_size,
             grid_blocks_total,
             grid_blocks_used,
+        })
+    }
+
+    /// Return the cluster ID stored in the superblock.
+    ///
+    /// This is the 128-bit cluster identifier set at format time via
+    /// `tigerbeetle format --cluster=N`. Encoded as a `u128` (little-endian at
+    /// superblock offset 48).
+    pub fn read_cluster_id(&mut self) -> Result<u128, ReaderError> {
+        let sb = read_superblock(&mut self.file, &self.config)?;
+        Ok(sb.cluster_id)
+    }
+
+    /// Return replica configuration read from the superblock.
+    ///
+    /// - `cluster_id`: 128-bit cluster ID set at format time.
+    /// - `replica`: zero-based replica index (derived from `replica_id` position
+    ///   in the `members` array). `None` if the replica ID is not found in members.
+    /// - `replica_count`: total number of replicas in the cluster.
+    pub fn read_replica_info(&mut self) -> Result<ReplicaInfo, ReaderError> {
+        let sb = read_superblock(&mut self.file, &self.config)?;
+        Ok(ReplicaInfo {
+            cluster_id: sb.cluster_id,
+            replica: sb.replica,
+            replica_count: sb.replica_count,
         })
     }
 

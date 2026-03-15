@@ -84,6 +84,15 @@ message GetStatusResponse {
     uint64 uptime_seconds = 4;
     // Data file capacity information.
     DataFileCapacity capacity = 5;
+    // Cluster ID read from the superblock (u128 encoded as decimal string).
+    // Empty string if the data file cannot be read or is not yet formatted.
+    string cluster_id = 6;
+    // Zero-based replica index derived from the superblock (replica_id position in members).
+    // -1 if not determinable (file unreadable or unformatted).
+    int32 replica = 7;
+    // Total replica count stored in the superblock (1–6).
+    // 0 if not determinable.
+    uint32 replica_count = 8;
 }
 
 enum ProcessState {
@@ -297,7 +306,12 @@ message FormatDataFileResponse {
 
 // --- Migration ---
 
-message PlanMigrationRequest {}
+message PlanMigrationRequest {
+    // Optional cutoff timestamp (nanoseconds since epoch).
+    // Transfers at or after this timestamp will be reproduced in the new cluster.
+    // Omit (= 0) for pure balance-snapshot migration (no transfer replay).
+    uint64 cutoff_ts = 1;
+}
 
 message PlanMigrationResponse {
     // Number of accounts found in the data file.
@@ -314,6 +328,9 @@ message PlanMigrationResponse {
     repeated LedgerSummary ledger_summaries = 6;
     // Accounts with non-zero pending balances (should be empty for safe migrations).
     repeated AccountRecord pending_accounts = 7;
+    // Number of actual transfers in the time window [cutoff_ts, now] to be reproduced.
+    // 0 if cutoff_ts was omitted.
+    uint64 windowed_transfers = 8;
 }
 
 message LedgerSummary {
@@ -372,10 +389,13 @@ message GetMigrationSyntheticTransfersResponse {
 }
 
 message ExecuteMigrationRequest {
-    // Cluster ID of the NEW cluster to import into.
-    uint64 new_cluster_id = 1;
+    // Cluster ID of the NEW cluster to import into (u128 as decimal string).
+    string new_cluster_id = 1;
     // Comma-separated addresses of the new cluster (e.g., "h1:3000,h2:3000,...").
     string new_addresses = 2;
+    // Optional cutoff timestamp (nanoseconds). Must match the value used in PlanMigration.
+    // Omit (= 0) for pure balance-snapshot migration.
+    uint64 cutoff_ts = 3;
 }
 
 message MigrationProgress {

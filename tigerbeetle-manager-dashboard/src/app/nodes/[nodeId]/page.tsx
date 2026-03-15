@@ -1097,12 +1097,17 @@ interface MigrationAccountFilter {
 }
 
 function MigratePanel({nodeId}: { nodeId: string }) {
+    const [cutoffDate, setCutoffDate] = useState(""); // datetime-local input value
+
+    // Convert datetime-local string → nanoseconds-since-epoch string (or undefined for snapshot-only).
+    const cutoffTs: string | undefined = cutoffDate
+        ? (BigInt(new Date(cutoffDate).getTime()) * BigInt(1_000_000)).toString()
+        : undefined;
+
     const planQuery = trpc.manager.planMigration.useQuery(
-        {nodeId},
+        {nodeId, cutoffTs},
         {enabled: false} // manual trigger
     );
-    const [newClusterId, setNewClusterId] = useState("");
-    const [newAddresses, setNewAddresses] = useState("");
     const [targetClusterId, setTargetClusterId] = useState("");
     const [migrating, setMigrating] = useState(false);
     const [progress, setProgress] = useState<MigrationProgressEvent[]>([]);
@@ -1136,12 +1141,6 @@ function MigratePanel({nodeId}: { nodeId: string }) {
         {enabled: !!targetClusterId}
     );
 
-    // Auto-populate addresses when a cluster is selected.
-    useEffect(() => {
-        if (clusterAddrQuery.data?.addresses) {
-            setNewAddresses(clusterAddrQuery.data.addresses);
-        }
-    }, [clusterAddrQuery.data]);
 
     const runPreflight = () => {
         planQuery.refetch();
@@ -1168,8 +1167,8 @@ function MigratePanel({nodeId}: { nodeId: string }) {
     };
 
     const startMigration = async () => {
-        const cid = parseInt(newClusterId, 10);
-        if (isNaN(cid) || !newAddresses.trim()) return;
+        const addresses = clusterAddrQuery.data?.addresses;
+        if (!targetClusterId || !addresses?.trim()) return;
 
         setMigrating(true);
         setProgress([]);
@@ -1182,8 +1181,9 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({
                     nodeId,
-                    newClusterId: cid,
-                    newAddresses: newAddresses.trim(),
+                    newClusterId: targetClusterId,
+                    newAddresses: addresses.trim(),
+                    cutoffTs,
                 }),
             });
 
@@ -1249,6 +1249,24 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                     Reads the data file to count accounts, check pending balances, and estimate synthetic transfers.
                     This is read-only and has no side effects.
                 </p>
+                <div className="mb-4">
+                    <label className="mb-1 block text-xs font-medium text-gray-700">
+                        Cutoff Date/Time
+                        <span className="ml-1 font-normal text-gray-400">(optional — for time-window migration)</span>
+                    </label>
+                    <input
+                        type="datetime-local"
+                        value={cutoffDate}
+                        onChange={(e) => setCutoffDate(e.target.value)}
+                        disabled={planQuery.isFetching || migrating}
+                        className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                    />
+                    <p className="mt-0.5 text-xs text-gray-400">
+                        {cutoffDate
+                            ? `Transfers at or after this date will be replayed verbatim. Older balances compressed.`
+                            : "Leave empty for pure balance-snapshot (no transfer replay)."}
+                    </p>
+                </div>
                 <button
                     onClick={runPreflight}
                     disabled={planQuery.isFetching}
@@ -1291,6 +1309,23 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                                 </div>
                             </div>
                         </div>
+
+                        {/* Windowed transfers count — only shown when cutoff_ts was set */}
+                        {plan.windowed_transfers && parseInt(plan.windowed_transfers, 10) > 0 && (
+                            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+                                <div className="text-xs font-medium text-blue-700">
+                                    Time-Window Mode
+                                </div>
+                                <div className="mt-0.5 text-xs text-blue-600">
+                                    <span className="font-bold tabular-nums">
+                                        {parseInt(plan.windowed_transfers, 10).toLocaleString()}
+                                    </span>{" "}
+                                    actual transfer{parseInt(plan.windowed_transfers, 10) !== 1 ? "s" : ""} will be
+                                    replayed verbatim from the time window.
+                                    Pre-cutoff balances will be compressed into synthetic transfers.
+                                </div>
+                            </div>
+                        )}
 
                         {/* Detail panels */}
                         {activeDetail === "accounts" && (
@@ -1529,84 +1564,34 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                     The new cluster must be formatted and running before executing.
                 </p>
 
-                <div className="mb-4 space-y-3">
-                    {/* Target cluster selector */}
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        <div>
-                            <label className="mb-1 block text-xs font-medium text-gray-700">Target Cluster</label>
-                            <select
-                                value={targetClusterId}
-                                onChange={(e) => {
-                                    setTargetClusterId(e.target.value);
-                                    setNewAddresses("");
-                                }}
-                                disabled={migrating}
-                                className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
-                            >
-                                <option value="">— select a cluster —</option>
-                                {(clustersQuery.data ?? []).map((c) => (
-                                    <option key={c.id} value={c.id}>{c.id} ({c.nodeCount} nodes)</option>
-                                ))}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="mb-1 block text-xs font-medium text-gray-700">
-                                TigerBeetle Cluster ID
-                                <span className="ml-1 text-gray-400 font-normal">(numeric)</span>
-                            </label>
-                            <input
-                                type="number"
-                                value={newClusterId}
-                                onChange={(e) => setNewClusterId(e.target.value)}
-                                placeholder="0"
-                                disabled={migrating}
-                                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
-                            />
-                        </div>
-                    </div>
-
-                    {/* Addresses — auto-populated from selected cluster */}
-                    <div>
-                        <div className="mb-1 flex items-center justify-between">
-                            <label className="text-xs font-medium text-gray-700">
-                                TigerBeetle Addresses
-                                {targetClusterId && clusterAddrQuery.isFetching && (
-                                    <span className="ml-2 text-gray-400 font-normal">fetching…</span>
-                                )}
-                                {targetClusterId && clusterAddrQuery.data && !clusterAddrQuery.isFetching && (
-                                    <span className="ml-2 font-normal text-green-600">
-                                        {clusterAddrQuery.data.onlineCount}/{clusterAddrQuery.data.nodeCount} nodes online
-                                    </span>
-                                )}
-                            </label>
-                            {targetClusterId && (
-                                <button
-                                    type="button"
-                                    onClick={() => clusterAddrQuery.refetch()}
-                                    disabled={clusterAddrQuery.isFetching || migrating}
-                                    className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-40"
-                                >
-                                    Refresh
-                                </button>
-                            )}
-                        </div>
-                        <input
-                            type="text"
-                            value={newAddresses}
-                            onChange={(e) => setNewAddresses(e.target.value)}
-                            placeholder={targetClusterId ? "Fetching addresses…" : "Select a cluster above, or enter manually: h1:3000,h2:3000"}
+                <div className="mb-4">
+                    <label className="mb-1 block text-xs font-medium text-gray-700">Target Cluster</label>
+                    <div className="flex items-center gap-3">
+                        <select
+                            value={targetClusterId}
+                            onChange={(e) => setTargetClusterId(e.target.value)}
                             disabled={migrating}
-                            className="w-full rounded-md border border-gray-300 px-3 py-2 font-mono text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
-                        />
-                        <p className="mt-0.5 text-xs text-gray-400">
-                            Auto-filled from target cluster nodes. You can edit manually if needed.
-                        </p>
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                        >
+                            <option value="">— select a cluster —</option>
+                            {(clustersQuery.data ?? []).map((c) => (
+                                <option key={c.id} value={c.id}>{c.id} ({c.nodeCount} nodes)</option>
+                            ))}
+                        </select>
+                        {targetClusterId && clusterAddrQuery.isFetching && (
+                            <span className="text-xs text-gray-400 whitespace-nowrap">fetching…</span>
+                        )}
+                        {targetClusterId && clusterAddrQuery.data && !clusterAddrQuery.isFetching && (
+                            <span className="text-xs text-green-600 whitespace-nowrap">
+                                {clusterAddrQuery.data.onlineCount}/{clusterAddrQuery.data.nodeCount} nodes
+                            </span>
+                        )}
                     </div>
                 </div>
 
                 <button
                     onClick={startMigration}
-                    disabled={migrating || !newClusterId || !newAddresses.trim() || (plan != null && !plan.safe)}
+                    disabled={migrating || !targetClusterId || !clusterAddrQuery.data?.addresses || clusterAddrQuery.isFetching || (plan != null && !plan.safe)}
                     className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
                 >
                     {migrating ? "Migrating..." : "Start Migration"}
@@ -1745,7 +1730,9 @@ export default function NodeDetailPage() {
                             <span
                                 className={`inline-block h-2.5 w-2.5 rounded-full ${node.online ? "bg-green-500" : "bg-red-500"}`}/>
                         ) : null}
-                        <h1 className="font-mono text-base font-bold text-gray-900">{nodeId}</h1>
+                        <h1 className="font-mono text-base font-bold text-gray-900">
+                            Replica {status?.replica != null && status.replica >= 0 ? status.replica : nodeId}
+                        </h1>
                         {process && <ProcessStateBadge state={process.state}/>}
                     </div>
                     <div className="ml-auto flex items-center gap-2 text-xs text-gray-400">
@@ -1808,6 +1795,13 @@ export default function NodeDetailPage() {
                                     <StatCell label="PID" value={process?.pid ?? "—"} mono/>
                                     <StatCell label="Uptime" value={formatUptime(status.uptime_seconds)}/>
                                     <StatCell label="Node ID" value={status.node_id} mono/>
+                                    <StatCell label="Cluster ID" value={status.cluster_id || "—"} mono/>
+                                    <StatCell label="Replica"
+                                              value={status.replica != null && status.replica >= 0 ? String(status.replica) : "—"}
+                                              mono/>
+                                    <StatCell label="Replica Count"
+                                              value={status.replica_count > 0 ? String(status.replica_count) : "—"}
+                                              mono/>
                                     <StatCell label="Address" value={process?.address ? `:${process.address}` : "—"}
                                               mono/>
                                     <StatCell label="Backups" value={

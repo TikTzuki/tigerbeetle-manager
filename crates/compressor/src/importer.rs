@@ -3,12 +3,12 @@
 use crate::error::{CompressorError, Result};
 use crate::plan::{BalancePlan, SyntheticTransfer};
 use tb_reader::Account as ReaderAccount;
+use tb_reader::Transfer as ReaderTransfer;
 use tigerbeetle_unofficial::{
     Account, Client, Transfer, account::Flags as AccountFlags, transfer::Flags as TransferFlags,
 };
 use tokio::sync::mpsc;
-use tracing::field::debug;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Maximum batch size for account/transfer creation.
 ///
@@ -150,17 +150,44 @@ impl Importer {
         for chunk in plan.synthetic_transfers.chunks(BATCH_SIZE) {
             let tb_transfers: Vec<Transfer> = chunk.iter().map(convert_transfer).collect();
             if let Err(e) = self.client.create_transfers(tb_transfers).await {
-                tracing::error!("Error creating transfers batch: {:?}", e);
+                tracing::error!("Error creating synthetic transfers batch: {:?}", e);
                 return Err(CompressorError::TransferCreationFailed(chunk.len()));
             }
             transfers_imported += chunk.len() as u64;
             let _ = tx
                 .send(ImportProgress {
-                    phase: "transfers".into(),
+                    phase: "synthetic_transfers".into(),
                     imported: transfers_imported,
                     total: transfers_total,
                 })
                 .await;
+        }
+
+        // Phase 4: windowed transfers (actual transfers from the time window).
+        // Only present for time-window migrations (cutoff_ts > 0).
+        if !plan.windowed_transfers.is_empty() {
+            info!(
+                "Finished importing synthetic transfers, starting windowed transfers: total={}",
+                plan.windowed_transfers.len()
+            );
+            let windowed_total = plan.windowed_transfers.len() as u64;
+            let mut windowed_imported = 0u64;
+            for chunk in plan.windowed_transfers.chunks(BATCH_SIZE) {
+                let tb_transfers: Vec<Transfer> =
+                    chunk.iter().map(convert_windowed_transfer).collect();
+                if let Err(e) = self.client.create_transfers(tb_transfers).await {
+                    tracing::error!("Error creating windowed transfers batch: {:?}", e);
+                    return Err(CompressorError::TransferCreationFailed(chunk.len()));
+                }
+                windowed_imported += chunk.len() as u64;
+                let _ = tx
+                    .send(ImportProgress {
+                        phase: "windowed_transfers".into(),
+                        imported: windowed_imported,
+                        total: windowed_total,
+                    })
+                    .await;
+            }
         }
 
         Ok(())
@@ -256,6 +283,57 @@ fn convert_transfer(t: &SyntheticTransfer) -> Transfer {
         .with_ledger(t.ledger)
         .with_code(t.code)
         .with_flags(TransferFlags::IMPORTED);
+
+    transfer.as_raw_mut().timestamp = t.timestamp;
+
+    transfer
+}
+
+/// Convert a reader Transfer to TigerBeetle's Transfer type for windowed replay.
+///
+/// Preserves all original fields (ID, accounts, amount, ledger, code, pending_id,
+/// user data, timeout) and all original flags, adding the `imported` flag so the
+/// caller can set an explicit timestamp.
+fn convert_windowed_transfer(t: &ReaderTransfer) -> Transfer {
+    let mut flags = TransferFlags::IMPORTED;
+    // Preserve original transfer flags.
+    if t.flags.linked() {
+        flags |= TransferFlags::LINKED;
+    }
+    if t.flags.pending() {
+        flags |= TransferFlags::PENDING;
+    }
+    if t.flags.post_pending_transfer() {
+        flags |= TransferFlags::POST_PENDING_TRANSFER;
+    }
+    if t.flags.void_pending_transfer() {
+        flags |= TransferFlags::VOID_PENDING_TRANSFER;
+    }
+    if t.flags.balancing_debit() {
+        flags |= TransferFlags::BALANCING_DEBIT;
+    }
+    if t.flags.balancing_credit() {
+        flags |= TransferFlags::BALANCING_CREDIT;
+    }
+    if t.flags.closing_debit() {
+        flags |= TransferFlags::CLOSING_DEBIT;
+    }
+    if t.flags.closing_credit() {
+        flags |= TransferFlags::CLOSING_CREDIT;
+    }
+
+    let mut transfer = Transfer::new(t.id)
+        .with_debit_account_id(t.debit_account_id)
+        .with_credit_account_id(t.credit_account_id)
+        .with_amount(t.amount)
+        .with_pending_id(t.pending_id)
+        .with_ledger(t.ledger)
+        .with_code(t.code)
+        .with_user_data_128(t.user_data_128)
+        .with_user_data_64(t.user_data_64)
+        .with_user_data_32(t.user_data_32)
+        .with_timeout(t.timeout)
+        .with_flags(flags);
 
     transfer.as_raw_mut().timestamp = t.timestamp;
 

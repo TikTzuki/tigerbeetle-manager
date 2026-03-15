@@ -2,11 +2,13 @@
 //!
 //! Usage:
 //!   tb-manager-node \
-//!     --node-id node-0 \
 //!     --grpc-port 9090 \
 //!     --exe tigerbeetle \
 //!     --backup-config-file ./backup_config.toml \
 //!     -- start --addresses=3000 ./data/0_0.tigerbeetle
+//!
+//! The node ID is derived automatically from the replica value in the data file
+//! superblock and returned by GetStatus.
 //!
 //! Backup settings (cron schedule, bucket, backup file path) are read from
 //! the TOML config file and can be updated live via the gRPC API.
@@ -25,10 +27,6 @@ use tracing_subscriber::FmtSubscriber;
 #[derive(Parser, Debug)]
 #[command(about = "Run a single TigerBeetle manager node with gRPC API")]
 struct Args {
-    /// Unique node identifier (e.g., "node-0").
-    #[arg(long, default_value = "node-0")]
-    node_id: String,
-
     /// Port for gRPC server.
     #[arg(long, default_value_t = 9090)]
     grpc_port: u16,
@@ -91,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| "./data/0_0.tigerbeetle".into()),
     );
 
-    info!("TigerBeetle Manager Node '{}' starting", args.node_id);
+    info!("TigerBeetle Manager Node starting");
     info!("  gRPC port:        {}", args.grpc_port);
     info!("  Executable:       {}", args.exe);
     info!("  Args:             {:?}", args.child_args);
@@ -153,7 +151,6 @@ async fn main() -> anyhow::Result<()> {
     let manager = ProcessManager::new(config, backup_strategy, Some(manager_log_tx), cron_rx);
 
     let node_state = tigerbeetle_manager_node::grpc_service::NodeState {
-        node_id: args.node_id.clone(),
         manager_state: manager.manager_state.clone(),
         log_tx,
         started_at: chrono::Utc::now(),

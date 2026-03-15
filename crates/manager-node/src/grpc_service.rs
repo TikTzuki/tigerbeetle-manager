@@ -20,7 +20,7 @@ use tb_reader::DataFileReader;
 use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Cached migration plan for paginated drill-down queries.
 #[derive(Debug, Clone)]
@@ -29,13 +29,13 @@ pub struct CachedMigrationPlan {
     pub accounts: Vec<tb_reader::Account>,
     /// Synthetic transfers computed by BalancePlan.
     pub synthetic_transfers: Vec<tb_compressor::SyntheticTransfer>,
+    /// Windowed transfers (empty for snapshot-only migrations).
+    pub windowed_transfers: Vec<tb_reader::Transfer>,
 }
 
 /// Shared state for the gRPC service.
 #[derive(Debug, Clone)]
 pub struct NodeState {
-    /// Node identifier (e.g., "node-0").
-    pub node_id: String,
     /// Shared manager state.
     pub manager_state: Arc<RwLock<ManagerState>>,
     /// Log broadcast channel (new entries pushed here).
@@ -106,26 +106,35 @@ impl ManagerNode for ManagerNodeService {
 
         let data_file = ms.backup_file.clone();
 
-        // Read data file capacity stats (best-effort, non-fatal if it fails).
-        let capacity = {
+        // Read data file capacity stats + replica info (best-effort, non-fatal).
+        let (capacity, replica_info) = {
             let df = data_file.clone();
             tokio::task::spawn_blocking(move || {
                 DataFileReader::open(&df)
-                    .and_then(|mut r| r.capacity_stats())
-                    .ok()
+                    .map(|mut r| {
+                        let capacity = r.capacity_stats().ok();
+                        let replica_info = r.read_replica_info().ok();
+                        (capacity, replica_info)
+                    })
+                    .unwrap_or((None, None))
             })
             .await
-            .ok()
-            .flatten()
-            .map(|stats| DataFileCapacity {
-                data_file_size_bytes: stats.data_file_size_bytes,
-                grid_blocks_total: stats.grid_blocks_total,
-                grid_blocks_used: stats.grid_blocks_used,
-            })
+            .unwrap_or((None, None))
         };
 
+        let capacity = capacity.map(|stats| DataFileCapacity {
+            data_file_size_bytes: stats.data_file_size_bytes,
+            grid_blocks_total: stats.grid_blocks_total,
+            grid_blocks_used: stats.grid_blocks_used,
+        });
+
+        let node_id = replica_info
+            .as_ref()
+            .and_then(|i| i.replica)
+            .map_or_else(|| "unknown".to_string(), |r| r.to_string());
+
         let response = GetStatusResponse {
-            node_id: self.state.node_id.clone(),
+            node_id,
             process: Some(ProcessStatus {
                 state: if ms.process_running {
                     ProcessState::Running.into()
@@ -147,6 +156,11 @@ impl ManagerNode for ManagerNodeService {
             }),
             uptime_seconds: uptime,
             capacity,
+            cluster_id: replica_info.map_or_else(String::new, |i| i.cluster_id.to_string()),
+            replica: replica_info
+                .and_then(|i| i.replica)
+                .map_or(-1i32, |r| r as i32),
+            replica_count: replica_info.map_or(0u32, |i| i.replica_count as u32),
         };
 
         Ok(Response::new(response))
@@ -713,10 +727,12 @@ impl ManagerNode for ManagerNodeService {
 
     async fn plan_migration(
         &self,
-        _request: Request<PlanMigrationRequest>,
+        request: Request<PlanMigrationRequest>,
     ) -> Result<Response<PlanMigrationResponse>, Status> {
+        let req = request.into_inner();
+        let cutoff_ts = req.cutoff_ts;
         let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("PlanMigration: reading accounts from {data_file}");
+        info!("PlanMigration: reading accounts from {data_file} cutoff_ts={cutoff_ts}");
 
         let result = tokio::task::spawn_blocking(
             move || -> Result<(PlanMigrationResponse, CachedMigrationPlan), String> {
@@ -759,16 +775,31 @@ impl ManagerNode for ManagerNodeService {
                     })
                     .collect();
 
-                // Clone accounts before BalancePlan::build() consumes them.
+                // Clone accounts before BalancePlan::build*() consumes them.
                 let accounts_for_cache = accounts.clone();
 
-                // Build plan to get synthetic transfer count.
-                let plan = tb_compressor::BalancePlan::build(accounts);
+                // Build plan (windowed or snapshot) to get transfer counts.
+                let (plan, windowed_count) = if cutoff_ts > 0 {
+                    let windowed = read_all_transfers_since(&data_file, cutoff_ts)?;
+                    let wcount = windowed.len() as u64;
+                    let p = tb_compressor::BalancePlan::build_windowed(
+                        accounts,
+                        windowed.clone(),
+                        cutoff_ts,
+                    );
+                    (p, wcount)
+                } else {
+                    let p = tb_compressor::BalancePlan::build(accounts);
+                    (p, 0u64)
+                };
+
                 let synthetic_transfers_count = plan.total_transfers() as u64;
 
+                let windowed_for_cache = plan.windowed_transfers.clone();
                 let cached = CachedMigrationPlan {
                     accounts: accounts_for_cache,
                     synthetic_transfers: plan.synthetic_transfers.clone(),
+                    windowed_transfers: windowed_for_cache,
                 };
 
                 let response = PlanMigrationResponse {
@@ -779,6 +810,7 @@ impl ManagerNode for ManagerNodeService {
                     ledgers: ledger_count,
                     ledger_summaries,
                     pending_accounts,
+                    windowed_transfers: windowed_count,
                 };
 
                 Ok((response, cached))
@@ -941,43 +973,60 @@ impl ManagerNode for ManagerNodeService {
             return Err(Status::invalid_argument("new_addresses must not be empty"));
         }
 
+        let cutoff_ts = req.cutoff_ts;
         let data_file = self.state.manager_state.read().await.backup_file.clone();
         info!(
-            "ExecuteMigration: cluster_id={} addresses={} source={}",
+            "ExecuteMigration: cluster_id={} addresses={} source={} cutoff_ts={cutoff_ts}",
             req.new_cluster_id, req.new_addresses, data_file
         );
 
-        // Read all accounts from data file — merge LSM + WAL (blocking).
-        let accounts = tokio::task::spawn_blocking({
+        // Read accounts and (optionally) windowed transfers — merge LSM + WAL (blocking).
+        let plan = tokio::task::spawn_blocking({
             let df = data_file.clone();
-            move || -> Result<Vec<tb_reader::Account>, String> { read_all_accounts(&df) }
+            move || -> Result<tb_compressor::BalancePlan, String> {
+                let accounts = read_all_accounts(&df)?;
+
+                // Safety check: refuse if any account has pending balances.
+                let pending_count = accounts
+                    .iter()
+                    .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
+                    .count();
+                if pending_count > 0 {
+                    return Err(format!(
+                        "{pending_count} account(s) have non-zero pending balances. \
+                         Void all pending transfers before migration."
+                    ));
+                }
+
+                if cutoff_ts > 0 {
+                    let windowed = read_all_transfers_since(&df, cutoff_ts)?;
+                    Ok(tb_compressor::BalancePlan::build_windowed(
+                        accounts, windowed, cutoff_ts,
+                    ))
+                } else {
+                    Ok(tb_compressor::BalancePlan::build(accounts))
+                }
+            }
         })
         .await
         .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| Status::internal(e))?;
+        .map_err(|e| Status::failed_precondition(e))?;
 
-        // Safety check: refuse if any account has pending balances.
-        let pending_count = accounts
-            .iter()
-            .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
-            .count();
-        if pending_count > 0 {
-            return Err(Status::failed_precondition(format!(
-                "{pending_count} account(s) have non-zero pending balances. \
-                 Void all pending transfers before migration."
-            )));
-        }
-
-        // Build the balance plan.
-        let plan = tb_compressor::BalancePlan::build(accounts);
         info!(
-            "ExecuteMigration plan: {} genesis + {} regular accounts, {} transfers",
+            "ExecuteMigration plan: {} genesis + {} regular accounts, \
+             {} synthetic transfers, {} windowed transfers",
             plan.genesis_accounts.len(),
             plan.regular_accounts.len(),
             plan.total_transfers(),
+            plan.total_windowed_transfers(),
         );
 
-        let new_cluster_id = req.new_cluster_id as u128;
+        let new_cluster_id: u128 = req.new_cluster_id.parse().map_err(|_| {
+            Status::invalid_argument(format!(
+                "invalid new_cluster_id {:?}: expected decimal u128",
+                req.new_cluster_id
+            ))
+        })?;
         let new_addresses = req.new_addresses.clone();
 
         // Create progress channel.
@@ -1066,6 +1115,53 @@ fn read_all_accounts(data_file: &str) -> Result<Vec<tb_reader::Account>, String>
     }
 
     Ok(by_id.into_values().collect())
+}
+
+/// Read all transfers with `timestamp >= cutoff_ts` from a data file.
+///
+/// Merges LSM (checkpointed) and WAL (pre-checkpoint) sources. WAL overrides
+/// LSM for the same transfer ID. Result is sorted by timestamp (ascending) —
+/// required for the `imported` flag constraint.
+fn read_all_transfers_since(
+    data_file: &str,
+    cutoff_ts: u64,
+) -> Result<Vec<tb_reader::Transfer>, String> {
+    use std::collections::HashMap;
+
+    let mut reader = DataFileReader::open(data_file).map_err(|e| format!("open data file: {e}"))?;
+
+    // 1. Read LSM transfers (checkpointed).
+    let lsm_transfers: Vec<tb_reader::Transfer> = match reader.iter_transfers() {
+        Ok(iter) => iter
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read LSM transfers: {e}"))?,
+        Err(tb_reader::ReaderError::NotCheckpointed { .. }) => vec![],
+        Err(e) => return Err(format!("iter LSM transfers: {e}")),
+    };
+
+    // 2. Read WAL transfers (post-checkpoint, not yet flushed to LSM).
+    let wal_transfers: Vec<tb_reader::Transfer> = match reader.iter_wal_transfers() {
+        Ok(iter) => iter
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read WAL transfers: {e}"))?,
+        Err(e) => return Err(format!("iter WAL transfers: {e}")),
+    };
+
+    // 3. Merge: start with LSM, then override/add from WAL (WAL has latest state).
+    let mut by_id: HashMap<u128, tb_reader::Transfer> =
+        lsm_transfers.into_iter().map(|t| (t.id, t)).collect();
+    for t in wal_transfers {
+        by_id.insert(t.id, t); // WAL overrides LSM for same ID
+    }
+
+    // 4. Filter to time window and sort by timestamp (required for imported flag).
+    let mut windowed: Vec<tb_reader::Transfer> = by_id
+        .into_values()
+        .filter(|t| t.timestamp >= cutoff_ts)
+        .collect();
+    windowed.sort_by_key(|t| t.timestamp);
+
+    Ok(windowed)
 }
 
 fn account_to_proto(a: tb_reader::Account) -> AccountRecord {

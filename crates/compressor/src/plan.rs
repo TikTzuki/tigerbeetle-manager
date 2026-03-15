@@ -1,7 +1,7 @@
 //! Balance snapshot planning — generates synthetic transfers for compression.
 
 use std::collections::HashMap;
-use tb_reader::Account;
+use tb_reader::{Account, Transfer};
 
 /// A group of accounts within a single ledger.
 #[derive(Debug, Clone)]
@@ -55,13 +55,19 @@ pub struct BalancePlan {
     pub regular_accounts: Vec<Account>,
     /// Synthetic transfers that reconstruct balances.
     pub synthetic_transfers: Vec<SyntheticTransfer>,
+    /// Actual transfers from the time window `[cutoff_ts, now]` to replay verbatim.
+    ///
+    /// Empty for pure snapshot migrations (`cutoff_ts = 0`). For windowed migrations,
+    /// these are replayed after synthetic transfers to restore the full final balance.
+    pub windowed_transfers: Vec<Transfer>,
 }
 
 impl BalancePlan {
-    /// Build a balance plan from a list of accounts.
+    /// Build a pure balance snapshot plan from a list of accounts.
     ///
     /// Groups accounts by ledger, creates genesis accounts, and generates
     /// synthetic transfers (≤ 2 per account: credit side + debit side).
+    /// No windowed transfer replay — `windowed_transfers` will be empty.
     ///
     /// ## Timestamp strategy (TigerBeetle `imported` flag)
     ///
@@ -76,6 +82,91 @@ impl BalancePlan {
     /// - **Synthetic transfers**: sequential timestamps starting from
     ///   `max(regular_account_timestamps) + 1`.
     pub fn build(accounts: Vec<Account>) -> Self {
+        Self::build_snapshot_impl(accounts, false)
+    }
+
+    /// Build a time-window migration plan.
+    ///
+    /// Accounts are adjusted so their balances reflect the state at `cutoff_ts`:
+    /// - Accounts created **before** `cutoff_ts`: balances are reduced by the sum
+    ///   of windowed transfer amounts they participated in.
+    /// - Accounts created **during** the window (`timestamp >= cutoff_ts`): balances
+    ///   are zeroed out (they didn't exist at cutoff; windowed transfer replay will
+    ///   restore them).
+    ///
+    /// The synthetic transfers reconstruct the adjusted (at-cutoff) balances.
+    /// The windowed transfers are stored verbatim and replayed in Phase 4, restoring
+    /// the full final balance.
+    ///
+    /// ## Timestamp ordering guarantee
+    ///
+    /// ```text
+    /// max_active_ts  <  synthetic_ts range  <  cutoff_ts  ≤  windowed_transfer_ts
+    /// ```
+    ///
+    /// Where `max_active_ts` is the maximum timestamp among accounts with a non-zero
+    /// balance at `cutoff_ts` (all such accounts have `timestamp < cutoff_ts`).
+    pub fn build_windowed(
+        accounts: Vec<Account>,
+        windowed_transfers: Vec<Transfer>,
+        cutoff_ts: u64,
+    ) -> Self {
+        // Compute per-account debit/credit deltas from windowed transfers.
+        let mut debit_delta: HashMap<u128, u128> = HashMap::new();
+        let mut credit_delta: HashMap<u128, u128> = HashMap::new();
+        for t in &windowed_transfers {
+            *debit_delta.entry(t.debit_account_id).or_insert(0) += t.amount;
+            *credit_delta.entry(t.credit_account_id).or_insert(0) += t.amount;
+        }
+
+        // Adjust each account's balance to reflect state at cutoff_ts.
+        let adjusted: Vec<Account> = accounts
+            .into_iter()
+            .map(|mut a| {
+                if a.timestamp >= cutoff_ts {
+                    // Account was created during the window — balance was 0 at cutoff.
+                    a.debits_posted = 0;
+                    a.credits_posted = 0;
+                } else {
+                    // Subtract windowed deltas: balance_at_cutoff = final − Σ(window deltas).
+                    a.debits_posted = a
+                        .debits_posted
+                        .saturating_sub(*debit_delta.get(&a.id).unwrap_or(&0));
+                    a.credits_posted = a
+                        .credits_posted
+                        .saturating_sub(*credit_delta.get(&a.id).unwrap_or(&0));
+                }
+                a
+            })
+            .collect();
+
+        let mut plan = Self::build_snapshot_impl(adjusted, true);
+        plan.windowed_transfers = windowed_transfers;
+        plan
+    }
+
+    /// Total number of accounts to import (genesis + regular).
+    pub fn total_accounts(&self) -> usize {
+        self.genesis_accounts.len() + self.regular_accounts.len()
+    }
+
+    /// Total number of synthetic transfers.
+    pub fn total_transfers(&self) -> usize {
+        self.synthetic_transfers.len()
+    }
+
+    /// Total number of windowed transfers to replay.
+    pub fn total_windowed_transfers(&self) -> usize {
+        self.windowed_transfers.len()
+    }
+
+    /// Core snapshot building logic.
+    ///
+    /// When `windowed_mode` is `true`, synthetic transfer timestamps start from the
+    /// maximum timestamp of accounts with non-zero balance (all < `cutoff_ts`), rather
+    /// than the maximum timestamp of all accounts. This keeps synthetic transfers in the
+    /// slot `(max_active_ts, cutoff_ts)` without colliding with windowed transfers.
+    fn build_snapshot_impl(accounts: Vec<Account>, windowed_mode: bool) -> Self {
         // Group accounts by ledger.
         let mut groups_map: HashMap<u32, Vec<Account>> = HashMap::new();
         for account in accounts {
@@ -166,12 +257,31 @@ impl BalancePlan {
             .last()
             .map_or(genesis_max_ts, |a| a.timestamp);
 
+        // Determine the starting timestamp floor for synthetic transfers.
+        //
+        // In windowed mode: use the max timestamp among accounts with non-zero balance
+        // at cutoff_ts (i.e., those that will actually have synthetic transfers). This
+        // keeps synthetic timestamps in (max_active_ts, cutoff_ts), safely below the
+        // first windowed transfer's timestamp (>= cutoff_ts).
+        //
+        // In snapshot mode: start after all regular accounts (max_account_ts).
+        let transfer_ts_floor = if windowed_mode {
+            regular_accounts
+                .iter()
+                .filter(|a| a.credits_posted > 0 || a.debits_posted > 0)
+                .map(|a| a.timestamp)
+                .max()
+                .unwrap_or(genesis_max_ts)
+        } else {
+            max_account_ts
+        };
+
         // Generate synthetic transfers.
         // Transfer timestamps must postdate both debit and credit account timestamps,
-        // so we use sequential timestamps starting after the last account timestamp.
+        // so we use sequential timestamps starting after the floor.
         let mut synthetic_transfers = Vec::new();
         let mut transfer_id_counter: u128 = 1; // Start from 1 (0 is reserved).
-        let mut transfer_ts = max_account_ts;
+        let mut transfer_ts = transfer_ts_floor;
 
         // Re-group by ledger for transfer generation (need both genesis IDs per ledger).
         let genesis_by_ledger: HashMap<u32, (u128, u128)> = groups
@@ -226,17 +336,8 @@ impl BalancePlan {
             genesis_accounts,
             regular_accounts,
             synthetic_transfers,
+            windowed_transfers: vec![],
         }
-    }
-
-    /// Total number of accounts to import (genesis + regular).
-    pub fn total_accounts(&self) -> usize {
-        self.genesis_accounts.len() + self.regular_accounts.len()
-    }
-
-    /// Total number of synthetic transfers.
-    pub fn total_transfers(&self) -> usize {
-        self.synthetic_transfers.len()
     }
 }
 
@@ -250,6 +351,7 @@ mod tests {
         assert_eq!(plan.genesis_accounts.len(), 0);
         assert_eq!(plan.regular_accounts.len(), 0);
         assert_eq!(plan.synthetic_transfers.len(), 0);
+        assert_eq!(plan.windowed_transfers.len(), 0);
     }
 
     #[test]
@@ -406,5 +508,108 @@ mod tests {
         assert!(plan.regular_accounts[0].timestamp < plan.regular_accounts[1].timestamp);
         // Both must be > last genesis timestamp (2ns for 1 ledger: credit=1, debit=2).
         assert!(plan.regular_accounts[0].timestamp > 2);
+    }
+
+    #[test]
+    fn test_build_windowed_adjusts_balances() {
+        // Account with final balance: debits_posted=300, credits_posted=500.
+        // Windowed transfers: debit 100 out, credit 200 in.
+        // Expected balance at cutoff: debits_posted=200, credits_posted=300.
+        let account = Account {
+            id: 10,
+            ledger: 1,
+            code: 5,
+            flags: tb_reader::AccountFlags::from(0),
+            timestamp: 1000,
+            debits_posted: 300,
+            credits_posted: 500,
+            debits_pending: 0,
+            credits_pending: 0,
+            user_data_128: 0,
+            user_data_64: 0,
+            user_data_32: 0,
+            reserved: 0,
+        };
+
+        let windowed = vec![
+            Transfer {
+                id: 1001,
+                debit_account_id: 10,
+                credit_account_id: 99,
+                amount: 100,
+                pending_id: 0,
+                user_data_128: 0,
+                user_data_64: 0,
+                user_data_32: 0,
+                timeout: 0,
+                ledger: 1,
+                code: 5,
+                flags: tb_reader::TransferFlags::from(0),
+                timestamp: 2000,
+            },
+            Transfer {
+                id: 1002,
+                debit_account_id: 99,
+                credit_account_id: 10,
+                amount: 200,
+                pending_id: 0,
+                user_data_128: 0,
+                user_data_64: 0,
+                user_data_32: 0,
+                timeout: 0,
+                ledger: 1,
+                code: 5,
+                flags: tb_reader::TransferFlags::from(0),
+                timestamp: 2001,
+            },
+        ];
+
+        let cutoff_ts = 1500u64;
+        let plan = BalancePlan::build_windowed(vec![account], windowed.clone(), cutoff_ts);
+
+        // Regular account should have adjusted balances.
+        assert_eq!(plan.regular_accounts.len(), 1);
+        let adj = &plan.regular_accounts[0];
+        assert_eq!(adj.debits_posted, 200); // 300 - 100
+        assert_eq!(adj.credits_posted, 300); // 500 - 200
+
+        // Synthetic transfers reconstruct the cutoff balances.
+        assert_eq!(plan.synthetic_transfers.len(), 2);
+
+        // Windowed transfers stored verbatim.
+        assert_eq!(plan.windowed_transfers.len(), 2);
+        assert_eq!(plan.windowed_transfers[0].id, 1001);
+        assert_eq!(plan.windowed_transfers[1].id, 1002);
+    }
+
+    #[test]
+    fn test_build_windowed_zeros_window_accounts() {
+        // Account created AFTER cutoff_ts — balance should be zeroed out.
+        let account = Account {
+            id: 20,
+            ledger: 1,
+            code: 5,
+            flags: tb_reader::AccountFlags::from(0),
+            timestamp: 3000, // > cutoff_ts
+            debits_posted: 50,
+            credits_posted: 75,
+            debits_pending: 0,
+            credits_pending: 0,
+            user_data_128: 0,
+            user_data_64: 0,
+            user_data_32: 0,
+            reserved: 0,
+        };
+
+        let cutoff_ts = 2000u64;
+        let plan = BalancePlan::build_windowed(vec![account], vec![], cutoff_ts);
+
+        // Account balance should be zeroed.
+        assert_eq!(plan.regular_accounts.len(), 1);
+        assert_eq!(plan.regular_accounts[0].debits_posted, 0);
+        assert_eq!(plan.regular_accounts[0].credits_posted, 0);
+
+        // No synthetic transfers (zero balance → no transfers needed).
+        assert_eq!(plan.synthetic_transfers.len(), 0);
     }
 }

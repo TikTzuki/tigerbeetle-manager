@@ -12,13 +12,14 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const {nodeId, newClusterId, newAddresses} = body as {
+    const {nodeId, newClusterId, newAddresses, cutoffTs} = body as {
         nodeId: string;
-        newClusterId: number;
+        newClusterId: string;
         newAddresses: string;
+        cutoffTs?: string;
     };
 
-    if (!nodeId || newClusterId == null || !newAddresses) {
+    if (!nodeId || !newClusterId || !newAddresses) {
         return new Response("Missing required fields: nodeId, newClusterId, newAddresses", {
             status: 400,
         });
@@ -38,6 +39,7 @@ export async function POST(request: NextRequest) {
                 port: node.port,
                 newClusterId,
                 newAddresses,
+                cutoffTs,
                 onProgress: (progress: MigrationProgress) => {
                     const data = `data: ${JSON.stringify(progress)}\n\n`;
                     controller.enqueue(encoder.encode(data));
