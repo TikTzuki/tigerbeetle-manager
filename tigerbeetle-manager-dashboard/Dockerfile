@@ -17,6 +17,8 @@ WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY tigerbeetle-manager-dashboard/ .
+# Proto must be present at build time — grpc-client.ts calls loadSync at module level
+COPY proto/ /proto/
 
 # Build args passed at image build time for public env vars
 ARG NEXT_PUBLIC_APP_URL
