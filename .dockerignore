@@ -1,0 +1,22 @@
+# Rust build artifacts (large — exclude from all Docker builds)
+target/
+
+# TigerBeetle data files
+data/
+*.tigerbeetle
+
+# Dashboard build artifacts and deps
+tigerbeetle-manager-dashboard/.next/
+tigerbeetle-manager-dashboard/node_modules/
+tigerbeetle-manager-dashboard/.env
+tigerbeetle-manager-dashboard/.env.local
+tigerbeetle-manager-dashboard/.env*.local
+tigerbeetle-manager-dashboard/*.tsbuildinfo
+
+# Git
+.git/
+.github/
+
+# Misc
+.DS_Store
+docs/

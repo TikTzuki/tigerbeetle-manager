@@ -4,10 +4,11 @@ FROM node:22-alpine AS base
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 # ---- deps ----
+# Build context is the repo root so paths are relative to it
 FROM base AS deps
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml ./
+COPY tigerbeetle-manager-dashboard/package.json tigerbeetle-manager-dashboard/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # ---- builder ----
@@ -15,7 +16,7 @@ FROM base AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY tigerbeetle-manager-dashboard/ .
 
 # Build args passed at image build time for public env vars
 ARG NEXT_PUBLIC_APP_URL
@@ -37,6 +38,9 @@ COPY --from=builder /app/public ./public
 # Standalone output includes server + minimal node_modules
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# grpc-client.ts resolves proto as process.cwd()+'/../proto/manager.proto' = /proto/manager.proto
+COPY proto/ /proto/
 
 USER nextjs
 

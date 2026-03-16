@@ -1,0 +1,12 @@
+services:
+  dashboard:
+    image: ghcr.io/tiktzuki/tb-manager-dashboard:latest
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_APP_URL: "${NEXT_PUBLIC_APP_URL:-http://localhost:3000}"
+      ADMIN_SECRET_KEY: "${ADMIN_SECRET_KEY:?ADMIN_SECRET_KEY is required}"
+      # Comma-separated host:port gRPC addresses of manager nodes.
+      # Use service names when nodes run in the same compose project.
+      MANAGER_NODES: "${MANAGER_NODES:-node-0:9090,node-1:9091,node-2:9092,node-3:9093,node-4:9094,node-5:9095}"
+    restart: unless-stopped
