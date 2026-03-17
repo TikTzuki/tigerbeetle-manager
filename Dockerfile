@@ -3,9 +3,12 @@ FROM rust:1.92-slim-bookworm AS builder
 
 WORKDIR /build
 
-# Install protoc (required by tonic-build)
+# Install protoc (required by tonic-build) + curl/ca-certs (required by
+# tigerbeetle-unofficial-sys build script to download Zig)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests first for better layer caching
