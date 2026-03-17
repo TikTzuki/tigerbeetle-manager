@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     curl \
     ca-certificates \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests first for better layer caching
