@@ -10,6 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     xz-utils \
+    clang \
+    libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy workspace manifests first for better layer caching
