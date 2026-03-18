@@ -1141,6 +1141,13 @@ function MigratePanel({nodeId}: { nodeId: string }) {
         {enabled: !!targetClusterId}
     );
 
+    // Editable address field — seeded from auto-resolved cluster addresses but user-modifiable.
+    const [editableAddresses, setEditableAddresses] = useState("");
+    useEffect(() => {
+        if (clusterAddrQuery.data?.addresses) {
+            setEditableAddresses(clusterAddrQuery.data.addresses);
+        }
+    }, [clusterAddrQuery.data?.addresses]);
 
     const runPreflight = () => {
         planQuery.refetch();
@@ -1167,8 +1174,7 @@ function MigratePanel({nodeId}: { nodeId: string }) {
     };
 
     const startMigration = async () => {
-        const addresses = clusterAddrQuery.data?.addresses;
-        if (!targetClusterId || !addresses?.trim()) return;
+        if (!targetClusterId || !editableAddresses.trim()) return;
 
         setMigrating(true);
         setProgress([]);
@@ -1182,7 +1188,7 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                 body: JSON.stringify({
                     nodeId,
                     newClusterId: targetClusterId,
-                    newAddresses: addresses.trim(),
+                    newAddresses: editableAddresses.trim(),
                     cutoffTs,
                 }),
             });
@@ -1589,9 +1595,26 @@ function MigratePanel({nodeId}: { nodeId: string }) {
                     </div>
                 </div>
 
+                {targetClusterId && (
+                    <div className="mb-4">
+                        <label className="mb-1 block text-xs font-medium text-gray-700">
+                            Target Addresses
+                            <span className="ml-1 font-normal text-gray-400">(comma-separated host:port — auto-filled, editable)</span>
+                        </label>
+                        <input
+                            type="text"
+                            value={editableAddresses}
+                            onChange={(e) => setEditableAddresses(e.target.value)}
+                            disabled={migrating}
+                            placeholder={clusterAddrQuery.isFetching ? "Resolving…" : "e.g. 10.0.0.1:3000,10.0.0.2:3000"}
+                            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs focus:border-gray-900 focus:outline-none focus:ring-1 focus:ring-gray-900 disabled:opacity-50"
+                        />
+                    </div>
+                )}
+
                 <button
                     onClick={startMigration}
-                    disabled={migrating || !targetClusterId || !clusterAddrQuery.data?.addresses || clusterAddrQuery.isFetching || (plan != null && !plan.safe)}
+                    disabled={migrating || !targetClusterId || !editableAddresses.trim() || clusterAddrQuery.isFetching || (plan != null && !plan.safe)}
                     className="rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
                 >
                     {migrating ? "Migrating..." : "Start Migration"}

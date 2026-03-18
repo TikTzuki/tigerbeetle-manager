@@ -110,8 +110,8 @@ export const managerRouter = router({
                 nodes.map(async (node) => {
                     const status = await getNodeStatus(node.host, node.port);
                     if (status.cluster_id !== input.clusterId) return null;
-                    const tbPort = status.process?.address;
-                    return tbPort ? `${node.host}:${tbPort}` : null;
+                    const tbAddress= status.process?.address;
+                    return tbAddress ? `${node.host}:${tbPort}` : null;
                 })
             );
 
