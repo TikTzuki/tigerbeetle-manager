@@ -4,8 +4,8 @@ use crate::error::{CompressorError, Result};
 use crate::plan::{BalancePlan, SyntheticTransfer};
 use tb_reader::Account as ReaderAccount;
 use tb_reader::Transfer as ReaderTransfer;
-use tigerbeetle_unofficial::{
-    Account, Client, Transfer, account::Flags as AccountFlags, transfer::Flags as TransferFlags,
+use tigerbeetle_client::{
+    Account, AccountFlags, Client, Transfer, TransferFlags,
 };
 use tokio::sync::mpsc;
 use tracing::info;
@@ -41,7 +41,7 @@ impl Importer {
     /// - `replica_addresses`: Comma-separated list of replica addresses (e.g., `"3000"` or `"3000,3001,3002"`).
     pub async fn connect(cluster_id: u128, replica_addresses: &str) -> Result<Self> {
         let client = Client::new(cluster_id, replica_addresses)
-            .map_err(|e| CompressorError::Client(format!("failed to connect: {e:?}")))?;
+            .map_err(|e| CompressorError::Client(format!("failed to connect: {e}")))?;
         Ok(Importer { client })
     }
 
@@ -102,9 +102,11 @@ impl Importer {
         for chunk in plan.genesis_accounts.chunks(BATCH_SIZE) {
             let tb_accounts: Vec<Account> =
                 chunk.iter().map(|acc| convert_account(acc, true)).collect();
-            if let Err(e) = self.client.create_accounts(tb_accounts).await {
-                tracing::error!("Error creating genesis accounts batch: {:?}", e);
-                return Err(CompressorError::AccountCreationFailed(chunk.len()));
+            let results = self.client.create_accounts(&tb_accounts).await
+                .map_err(|e| CompressorError::Client(format!("create_accounts: {e}")))?;
+            if !results.is_empty() {
+                tracing::error!("Error creating genesis accounts batch: {:?}", results);
+                return Err(CompressorError::AccountCreationFailed(results.len()));
             }
             genesis_imported += chunk.len() as u64;
             let _ = tx
@@ -126,9 +128,11 @@ impl Importer {
         for chunk in plan.regular_accounts.chunks(BATCH_SIZE) {
             let tb_accounts: Vec<Account> =
                 chunk.iter().map(|acc| convert_account(acc, true)).collect();
-            if let Err(e) = self.client.create_accounts(tb_accounts).await {
-                tracing::error!("Error creating regular accounts batch: {:?}", e);
-                return Err(CompressorError::AccountCreationFailed(chunk.len()));
+            let results = self.client.create_accounts(&tb_accounts).await
+                .map_err(|e| CompressorError::Client(format!("create_accounts: {e}")))?;
+            if !results.is_empty() {
+                tracing::error!("Error creating regular accounts batch: {:?}", results);
+                return Err(CompressorError::AccountCreationFailed(results.len()));
             }
             accounts_imported += chunk.len() as u64;
             let _ = tx
@@ -150,9 +154,11 @@ impl Importer {
         for chunk in plan.synthetic_transfers.chunks(BATCH_SIZE) {
             let tb_transfers: Vec<Transfer> =
                 chunk.iter().map(|t| convert_transfer(t)).collect();
-            if let Err(e) = self.client.create_transfers(tb_transfers).await {
-                tracing::error!("Error creating synthetic transfers batch: {:?}", e);
-                return Err(CompressorError::TransferCreationFailed(chunk.len()));
+            let results = self.client.create_transfers(&tb_transfers).await
+                .map_err(|e| CompressorError::Client(format!("create_transfers: {e}")))?;
+            if !results.is_empty() {
+                tracing::error!("Error creating synthetic transfers batch: {:?}", results);
+                return Err(CompressorError::TransferCreationFailed(results.len()));
             }
             transfers_imported += chunk.len() as u64;
             let _ = tx
@@ -176,9 +182,11 @@ impl Importer {
             for chunk in plan.windowed_transfers.chunks(BATCH_SIZE) {
                 let tb_transfers: Vec<Transfer> =
                     chunk.iter().map(|t| convert_windowed_transfer(t)).collect();
-                if let Err(e) = self.client.create_transfers(tb_transfers).await {
-                    tracing::error!("Error creating windowed transfers batch: {:?}", e);
-                    return Err(CompressorError::TransferCreationFailed(chunk.len()));
+                let results = self.client.create_transfers(&tb_transfers).await
+                    .map_err(|e| CompressorError::Client(format!("create_transfers: {e}")))?;
+                if !results.is_empty() {
+                    tracing::error!("Error creating windowed transfers batch: {:?}", results);
+                    return Err(CompressorError::TransferCreationFailed(results.len()));
                 }
                 windowed_imported += chunk.len() as u64;
                 let _ = tx
@@ -206,9 +214,11 @@ impl Importer {
                 .map(|acc| convert_account(acc, imported))
                 .collect();
 
-            if let Err(e) = self.client.create_accounts(tb_accounts).await {
-                eprintln!("Error creating accounts batch {}: {:?}", batch_idx, e);
-                return Err(CompressorError::AccountCreationFailed(chunk.len()));
+            let results = self.client.create_accounts(&tb_accounts).await
+                .map_err(|e| CompressorError::Client(format!("create_accounts: {e}")))?;
+            if !results.is_empty() {
+                eprintln!("Error creating accounts batch {}: {:?}", batch_idx, results);
+                return Err(CompressorError::AccountCreationFailed(results.len()));
             }
         }
         Ok(())
@@ -223,9 +233,11 @@ impl Importer {
             let tb_transfers: Vec<Transfer> =
                 chunk.iter().map(|t| convert_transfer(t)).collect();
 
-            if let Err(e) = self.client.create_transfers(tb_transfers).await {
-                eprintln!("Error creating transfers batch {}: {:?}", batch_idx, e);
-                return Err(CompressorError::TransferCreationFailed(chunk.len()));
+            let results = self.client.create_transfers(&tb_transfers).await
+                .map_err(|e| CompressorError::Client(format!("create_transfers: {e}")))?;
+            if !results.is_empty() {
+                eprintln!("Error creating transfers batch {}: {:?}", batch_idx, results);
+                return Err(CompressorError::TransferCreationFailed(results.len()));
             }
         }
         Ok(())
@@ -234,46 +246,42 @@ impl Importer {
 
 /// Convert our Account type to TigerBeetle's Account type.
 ///
-/// When `imported` is true, sets `AccountFlags::IMPORTED` and copies the
+/// When `imported` is true, sets `AccountFlags::Imported` and copies the
 /// account's timestamp into the raw struct (TigerBeetle requires non-zero,
 /// strictly increasing timestamps for imported accounts).
 fn convert_account(acc: &ReaderAccount, imported: bool) -> Account {
     let mut flags = AccountFlags::empty();
     if imported {
-        flags |= AccountFlags::IMPORTED;
+        flags |= AccountFlags::Imported;
     }
     // Preserve original account flags.
     if acc.flags.linked() {
-        flags |= AccountFlags::LINKED;
+        flags |= AccountFlags::Linked;
     }
     if acc.flags.debits_must_not_exceed_credits() {
-        flags |= AccountFlags::DEBITS_MUST_NOT_EXCEED_CREDITS;
+        flags |= AccountFlags::DebitsMustNotExceedCredits;
     }
     if acc.flags.credits_must_not_exceed_debits() {
-        flags |= AccountFlags::CREDITS_MUST_NOT_EXCEED_DEBITS;
+        flags |= AccountFlags::CreditsMustNotExceedDebits;
     }
     if acc.flags.history() {
-        flags |= AccountFlags::HISTORY;
+        flags |= AccountFlags::History;
     }
     if acc.flags.closed() {
-        flags |= AccountFlags::CLOSED;
+        flags |= AccountFlags::Closed;
     }
 
-    info!(
-        "Converting account {} with code {:?}, flags {:?} (imported={})",
-        acc.id, acc.code, flags, imported
-    );
-    let mut account = Account::new(acc.id, acc.ledger, acc.code)
-        .with_flags(flags)
-        .with_user_data_128(acc.user_data_128)
-        .with_user_data_64(acc.user_data_64)
-        .with_user_data_32(acc.user_data_32);
-
-    if imported {
-        account.as_raw_mut().timestamp = acc.timestamp;
+    Account {
+        id: acc.id,
+        ledger: acc.ledger,
+        code: acc.code,
+        flags,
+        user_data_128: acc.user_data_128,
+        user_data_64: acc.user_data_64,
+        user_data_32: acc.user_data_32,
+        timestamp: if imported { acc.timestamp } else { 0 },
+        ..Default::default()
     }
-
-    account
 }
 
 /// Convert our SyntheticTransfer to TigerBeetle's Transfer type.
@@ -281,17 +289,17 @@ fn convert_account(acc: &ReaderAccount, imported: bool) -> Account {
 /// All synthetic transfers use the `imported` flag with an explicit timestamp
 /// that postdates both debit and credit account timestamps.
 fn convert_transfer(t: &SyntheticTransfer) -> Transfer {
-    let mut transfer = Transfer::new(t.id)
-        .with_debit_account_id(t.debit_account_id)
-        .with_credit_account_id(t.credit_account_id)
-        .with_amount(t.amount)
-        .with_ledger(t.ledger)
-        .with_code(t.code)
-        .with_flags(TransferFlags::IMPORTED);
-
-    transfer.as_raw_mut().timestamp = t.timestamp;
-
-    transfer
+    Transfer {
+        id: t.id,
+        debit_account_id: t.debit_account_id,
+        credit_account_id: t.credit_account_id,
+        amount: t.amount,
+        ledger: t.ledger,
+        code: t.code,
+        flags: TransferFlags::Imported,
+        timestamp: t.timestamp,
+        ..Default::default()
+    }
 }
 
 /// Convert a reader Transfer to TigerBeetle's Transfer type for windowed replay.
@@ -300,47 +308,46 @@ fn convert_transfer(t: &SyntheticTransfer) -> Transfer {
 /// user data, timeout) and all original flags, adding the `imported` flag so the
 /// caller can set an explicit timestamp.
 fn convert_windowed_transfer(t: &ReaderTransfer) -> Transfer {
-    let mut flags = TransferFlags::IMPORTED;
+    let mut flags = TransferFlags::Imported;
     // Preserve original transfer flags.
     if t.flags.linked() {
-        flags |= TransferFlags::LINKED;
+        flags |= TransferFlags::Linked;
     }
     if t.flags.pending() {
-        flags |= TransferFlags::PENDING;
+        flags |= TransferFlags::Pending;
     }
     if t.flags.post_pending_transfer() {
-        flags |= TransferFlags::POST_PENDING_TRANSFER;
+        flags |= TransferFlags::PostPendingTransfer;
     }
     if t.flags.void_pending_transfer() {
-        flags |= TransferFlags::VOID_PENDING_TRANSFER;
+        flags |= TransferFlags::VoidPendingTransfer;
     }
     if t.flags.balancing_debit() {
-        flags |= TransferFlags::BALANCING_DEBIT;
+        flags |= TransferFlags::BalancingDebit;
     }
     if t.flags.balancing_credit() {
-        flags |= TransferFlags::BALANCING_CREDIT;
+        flags |= TransferFlags::BalancingCredit;
     }
     if t.flags.closing_debit() {
-        flags |= TransferFlags::CLOSING_DEBIT;
+        flags |= TransferFlags::ClosingDebit;
     }
     if t.flags.closing_credit() {
-        flags |= TransferFlags::CLOSING_CREDIT;
+        flags |= TransferFlags::ClosingCredit;
     }
 
-    let mut transfer = Transfer::new(t.id)
-        .with_debit_account_id(t.debit_account_id)
-        .with_credit_account_id(t.credit_account_id)
-        .with_amount(t.amount)
-        .with_pending_id(t.pending_id)
-        .with_ledger(t.ledger)
-        .with_code(t.code)
-        .with_user_data_128(t.user_data_128)
-        .with_user_data_64(t.user_data_64)
-        .with_user_data_32(t.user_data_32)
-        .with_timeout(t.timeout)
-        .with_flags(flags);
-
-    transfer.as_raw_mut().timestamp = t.timestamp;
-
-    transfer
+    Transfer {
+        id: t.id,
+        debit_account_id: t.debit_account_id,
+        credit_account_id: t.credit_account_id,
+        amount: t.amount,
+        pending_id: t.pending_id,
+        user_data_128: t.user_data_128,
+        user_data_64: t.user_data_64,
+        user_data_32: t.user_data_32,
+        timeout: t.timeout,
+        ledger: t.ledger,
+        code: t.code,
+        flags,
+        timestamp: t.timestamp,
+    }
 }

@@ -137,3 +137,4 @@ tb-compressor = { path = "crates/compressor", package = "tigerbeetle-manager-com
 tb-manager = { path = "crates/manager", package = "tigerbeetle-manager" }
 tb-manager-server = { path = "crates/manager-server", package = "tigerbeetle-manager-server" }
 tb-manager-node = { path = "crates/manager-node", package = "tigerbeetle-manager-node" }
+tigerbeetle-client = { path = "crates/tigerbeetle-client" }

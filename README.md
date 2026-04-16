@@ -80,7 +80,7 @@ importer.import_transfers( & plan).await?;
 
 - Genesis account generation per ledger
 - Synthetic transfer generation (credit side → debit side ordering)
-- Batch import with tigerbeetle-unofficial client
+- Batch import with tigerbeetle-client
 - Preserves all account metadata and flags
 
 ### `tigerbeetle-manager` (`crates/manager/`)
