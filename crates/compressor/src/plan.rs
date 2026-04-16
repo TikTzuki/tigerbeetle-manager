@@ -304,7 +304,7 @@ impl BalancePlan {
                     credit_account_id: acc.id,
                     amount: acc.credits_posted,
                     ledger: acc.ledger,
-                    code: acc.code,
+                    code: 999,
                     timestamp: transfer_ts,
                 });
                 transfer_id_counter += 1;
@@ -322,7 +322,7 @@ impl BalancePlan {
                     credit_account_id: genesis_debit_id,
                     amount: acc.debits_posted,
                     ledger: acc.ledger,
-                    code: acc.code,
+                    code: 999,
                     timestamp: transfer_ts,
                 });
                 transfer_id_counter += 1;

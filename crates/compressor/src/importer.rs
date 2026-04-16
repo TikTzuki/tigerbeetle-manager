@@ -42,6 +42,24 @@ impl Importer {
     pub async fn connect(cluster_id: u128, replica_addresses: &str) -> Result<Self> {
         let client = Client::new(cluster_id, replica_addresses)
             .map_err(|e| CompressorError::Client(format!("failed to connect: {e}")))?;
+
+        // Probe connectivity with a 30s timeout. Client::new() is lazy —
+        // a bad address won't error until the first real request.
+        let probe = client.lookup_accounts(&[0u128]);
+        match tokio::time::timeout(std::time::Duration::from_secs(30), probe).await {
+            Ok(Ok(_)) => {} // connected (account not found is fine)
+            Ok(Err(e)) => {
+                return Err(CompressorError::Client(format!(
+                    "target cluster rejected probe request: {e}"
+                )));
+            }
+            Err(_) => {
+                return Err(CompressorError::Client(
+                    "connection to target cluster timed out after 30s".into(),
+                ));
+            }
+        }
+
         Ok(Importer { client })
     }
 

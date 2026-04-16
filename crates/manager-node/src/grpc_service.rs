@@ -1034,6 +1034,9 @@ impl ManagerNode for ManagerNodeService {
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
 
+        // Error channel for connection/import failures.
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel::<String>();
+
         // Spawn the import task.
         tokio::spawn(async move {
             let importer =
@@ -1041,12 +1044,16 @@ impl ManagerNode for ManagerNodeService {
                     Ok(imp) => imp,
                     Err(e) => {
                         tracing::error!("ExecuteMigration: failed to connect to new cluster: {e}");
+                        let _ = error_tx.send(format!("{e}"));
                         return;
                     }
                 };
 
             if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
                 tracing::error!("ExecuteMigration: import failed: {e}");
+                let _ = error_tx.send(format!("{e}"));
+            } else {
+                let _ = error_tx.send(String::new());
             }
         });
 
@@ -1062,12 +1069,13 @@ impl ManagerNode for ManagerNodeService {
                 });
             }
             // Channel closed — import is done (or errored).
+            let error_msg = error_rx.await.unwrap_or_default();
             yield Ok(MigrationProgress {
                 phase: "done".into(),
                 imported: 0,
                 total: 0,
                 done: true,
-                error: String::new(),
+                error: error_msg,
             });
         };
 
@@ -1128,6 +1136,8 @@ impl ManagerNode for ManagerNodeService {
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
 
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel::<String>();
+
         tokio::spawn(async move {
             let importer =
                 match tb_compressor::Importer::connect(new_cluster_id, &target_addresses).await {
@@ -1136,12 +1146,16 @@ impl ManagerNode for ManagerNodeService {
                         tracing::error!(
                             "ImportCsvTransfers: failed to connect to target cluster: {e}"
                         );
+                        let _ = error_tx.send(format!("{e}"));
                         return;
                     }
                 };
 
             if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
                 tracing::error!("ImportCsvTransfers: import failed: {e}");
+                let _ = error_tx.send(format!("{e}"));
+            } else {
+                let _ = error_tx.send(String::new());
             }
         });
 
@@ -1155,12 +1169,13 @@ impl ManagerNode for ManagerNodeService {
                     error: String::new(),
                 });
             }
+            let error_msg = error_rx.await.unwrap_or_default();
             yield Ok(MigrationProgress {
                 phase: "done".into(),
                 imported: 0,
                 total: 0,
                 done: true,
-                error: String::new(),
+                error: error_msg,
             });
         };
 

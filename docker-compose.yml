@@ -1,12 +1,44 @@
 services:
-  dashboard:
-    image: ghcr.io/tiktzuki/tb-manager-dashboard:latest
+#  dashboard:
+#    image: ghcr.io/tiktzuki/tb-manager-dashboard:latest
+#    ports:
+#      - "3000:3000"
+#    environment:
+#      NEXT_PUBLIC_APP_URL: "${NEXT_PUBLIC_APP_URL:-http://localhost:3000}"
+#      ADMIN_SECRET_KEY: "${ADMIN_SECRET_KEY:?ADMIN_SECRET_KEY is required}"
+#      # Comma-separated host:port gRPC addresses of manager nodes.
+#      # Use service names when nodes run in the same compose project.
+#      MANAGER_NODES: "${MANAGER_NODES:-node-0:9090,node-1:9091,node-2:9092,node-3:9093,node-4:9094,node-5:9095}"
+#    restart: unless-stopped
+  tb_cluster1:
+    image: tiktuzki/tb-node:demo
+    container_name: tb_cluster1
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - IPC_LOCK
+    entrypoint: [ "tb-manager-node" ]
     ports:
-      - "3000:3000"
-    environment:
-      NEXT_PUBLIC_APP_URL: "${NEXT_PUBLIC_APP_URL:-http://localhost:3000}"
-      ADMIN_SECRET_KEY: "${ADMIN_SECRET_KEY:?ADMIN_SECRET_KEY is required}"
-      # Comma-separated host:port gRPC addresses of manager nodes.
-      # Use service names when nodes run in the same compose project.
-      MANAGER_NODES: "${MANAGER_NODES:-node-0:9090,node-1:9091,node-2:9092,node-3:9093,node-4:9094,node-5:9095}"
+      - "9002:9002"
+      - "3003:3003"
+    command:
+      - "--backup-config-file"
+      - "./backup_config.toml"
+      - "--grpc-port=9002"
+      - "--exe=tigerbeetle"
+      - "--"
+      - "start"
+      - "--addresses=0.0.0.0:3003"
+      - "/data/0.tb"
+    volumes:
+      - ./data:/data
+    networks:
+      default:
+        ipv4_address: 172.30.0.11
     restart: unless-stopped
+networks:
+  default:
+    name: ledger-network
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
