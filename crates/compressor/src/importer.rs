@@ -78,7 +78,7 @@ impl Importer {
     pub async fn import_transfers(&self, plan: &BalancePlan) -> Result<()> {
         println!(
             "Importing {} synthetic transfer(s)...",
-            plan.synthetic_transfers.len()
+            plan.synthetic_transfers.len(),
         );
         self.create_transfers_batch(&plan.synthetic_transfers)
             .await?;
@@ -143,12 +143,13 @@ impl Importer {
         // Phase 3: synthetic transfers.
         info!(
             "Finished importing accounts, starting synthetic transfers: total={}",
-            plan.synthetic_transfers.len()
+            plan.synthetic_transfers.len(),
         );
         let transfers_total = plan.synthetic_transfers.len() as u64;
         let mut transfers_imported = 0u64;
         for chunk in plan.synthetic_transfers.chunks(BATCH_SIZE) {
-            let tb_transfers: Vec<Transfer> = chunk.iter().map(convert_transfer).collect();
+            let tb_transfers: Vec<Transfer> =
+                chunk.iter().map(|t| convert_transfer(t)).collect();
             if let Err(e) = self.client.create_transfers(tb_transfers).await {
                 tracing::error!("Error creating synthetic transfers batch: {:?}", e);
                 return Err(CompressorError::TransferCreationFailed(chunk.len()));
@@ -174,7 +175,7 @@ impl Importer {
             let mut windowed_imported = 0u64;
             for chunk in plan.windowed_transfers.chunks(BATCH_SIZE) {
                 let tb_transfers: Vec<Transfer> =
-                    chunk.iter().map(convert_windowed_transfer).collect();
+                    chunk.iter().map(|t| convert_windowed_transfer(t)).collect();
                 if let Err(e) = self.client.create_transfers(tb_transfers).await {
                     tracing::error!("Error creating windowed transfers batch: {:?}", e);
                     return Err(CompressorError::TransferCreationFailed(chunk.len()));
@@ -214,9 +215,13 @@ impl Importer {
     }
 
     /// Create transfers in batches.
-    async fn create_transfers_batch(&self, transfers: &[SyntheticTransfer]) -> Result<()> {
+    async fn create_transfers_batch(
+        &self,
+        transfers: &[SyntheticTransfer],
+    ) -> Result<()> {
         for (batch_idx, chunk) in transfers.chunks(BATCH_SIZE).enumerate() {
-            let tb_transfers: Vec<Transfer> = chunk.iter().map(convert_transfer).collect();
+            let tb_transfers: Vec<Transfer> =
+                chunk.iter().map(|t| convert_transfer(t)).collect();
 
             if let Err(e) = self.client.create_transfers(tb_transfers).await {
                 eprintln!("Error creating transfers batch {}: {:?}", batch_idx, e);

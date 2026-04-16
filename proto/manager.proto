@@ -67,6 +67,20 @@ service ManagerNode {
     // Browse cached migration synthetic transfers with pagination.
     // Requires a prior PlanMigration call to populate the cache.
     rpc GetMigrationSyntheticTransfers (GetMigrationSyntheticTransfersRequest) returns (GetMigrationSyntheticTransfersResponse);
+
+    // Import transfers from exported CSV data into a target cluster.
+    // The target cluster must already have accounts created (e.g., via ExecuteMigration).
+    // Transfers are created with the `imported` flag preserving original timestamps.
+    rpc ImportCsvTransfers (ImportCsvTransfersRequest) returns (stream MigrationProgress);
+}
+
+message ImportCsvTransfersRequest {
+    // Cluster ID of the target cluster (u128 as decimal string).
+    string target_cluster_id = 1;
+    // Comma-separated addresses of the target cluster (e.g., "h1:3000,h2:3000").
+    string target_addresses = 2;
+    // Transfers to import (parsed from CSV export).
+    repeated TransferRecord transfers = 3;
 }
 
 // --- Status ---

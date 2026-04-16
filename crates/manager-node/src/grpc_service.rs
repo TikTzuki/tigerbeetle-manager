@@ -5,12 +5,13 @@ use crate::proto::{
     FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse,
     GetMigrationAccountsRequest, GetMigrationAccountsResponse,
     GetMigrationSyntheticTransfersRequest, GetMigrationSyntheticTransfersResponse,
-    GetStatusRequest, GetStatusResponse, LedgerSummary, LogEntry, LogLevel, MigrationProgress,
-    ModifyBackupConfigRequest, ModifyBackupConfigResponse, PlanMigrationRequest,
-    PlanMigrationResponse, ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse,
-    ReadTransfersRequest, ReadTransfersResponse, StartBackupRequest, StartBackupResponse,
-    StopBackupRequest, StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord,
-    TransferRecord, TriggerBackupRequest, TriggerBackupResponse, manager_node_server::ManagerNode,
+    GetStatusRequest, GetStatusResponse, ImportCsvTransfersRequest, LedgerSummary, LogEntry,
+    LogLevel, MigrationProgress, ModifyBackupConfigRequest, ModifyBackupConfigResponse,
+    PlanMigrationRequest, PlanMigrationResponse, ProcessState, ProcessStatus, ReadAccountsRequest,
+    ReadAccountsResponse, ReadTransfersRequest, ReadTransfersResponse, StartBackupRequest,
+    StartBackupResponse, StopBackupRequest, StopBackupResponse, StreamLogsRequest,
+    SyntheticTransferRecord, TransferRecord, TriggerBackupRequest, TriggerBackupResponse,
+    manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -1072,6 +1073,99 @@ impl ManagerNode for ManagerNodeService {
 
         Ok(Response::new(Box::pin(stream)))
     }
+
+    type ImportCsvTransfersStream =
+        Pin<Box<dyn Stream<Item = Result<MigrationProgress, Status>> + Send + 'static>>;
+
+    async fn import_csv_transfers(
+        &self,
+        request: Request<ImportCsvTransfersRequest>,
+    ) -> Result<Response<Self::ImportCsvTransfersStream>, Status> {
+        let req = request.into_inner();
+
+        if req.target_addresses.is_empty() {
+            return Err(Status::invalid_argument(
+                "target_addresses must not be empty",
+            ));
+        }
+        if req.transfers.is_empty() {
+            return Err(Status::invalid_argument("transfers must not be empty"));
+        }
+
+        let new_cluster_id: u128 = req.target_cluster_id.parse().map_err(|_| {
+            Status::invalid_argument(format!(
+                "invalid target_cluster_id {:?}: expected decimal u128",
+                req.target_cluster_id
+            ))
+        })?;
+
+        // Convert proto TransferRecords → tb_reader::Transfer.
+        let transfers: Vec<tb_reader::Transfer> = req
+            .transfers
+            .into_iter()
+            .map(proto_to_transfer)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("invalid transfer: {e}")))?;
+
+        info!(
+            "ImportCsvTransfers: {} transfers → cluster {} @ {}",
+            transfers.len(),
+            new_cluster_id,
+            req.target_addresses
+        );
+
+        // Build a BalancePlan with only windowed_transfers.
+        // Phases 1-3 (genesis, accounts, synthetic) will be empty and skipped.
+        // Phase 4 (windowed_transfers) will import the CSV transfers.
+        let plan = tb_compressor::BalancePlan {
+            genesis_accounts: vec![],
+            regular_accounts: vec![],
+            synthetic_transfers: vec![],
+            windowed_transfers: transfers,
+        };
+
+        let target_addresses = req.target_addresses.clone();
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
+
+        tokio::spawn(async move {
+            let importer =
+                match tb_compressor::Importer::connect(new_cluster_id, &target_addresses).await {
+                    Ok(imp) => imp,
+                    Err(e) => {
+                        tracing::error!(
+                            "ImportCsvTransfers: failed to connect to target cluster: {e}"
+                        );
+                        return;
+                    }
+                };
+
+            if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
+                tracing::error!("ImportCsvTransfers: import failed: {e}");
+            }
+        });
+
+        let stream = async_stream::stream! {
+            while let Some(p) = progress_rx.recv().await {
+                yield Ok(MigrationProgress {
+                    phase: p.phase,
+                    imported: p.imported,
+                    total: p.total,
+                    done: false,
+                    error: String::new(),
+                });
+            }
+            yield Ok(MigrationProgress {
+                phase: "done".into(),
+                imported: 0,
+                total: 0,
+                done: true,
+                error: String::new(),
+            });
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,6 +1291,39 @@ fn transfer_to_proto(t: tb_reader::Transfer) -> TransferRecord {
         flags: t.flags.raw() as u32,
         timestamp: t.timestamp,
     }
+}
+
+fn proto_to_transfer(t: TransferRecord) -> Result<tb_reader::Transfer, String> {
+    Ok(tb_reader::Transfer {
+        id: t.id.parse::<u128>().map_err(|_| format!("invalid id: {}", t.id))?,
+        debit_account_id: t
+            .debit_account_id
+            .parse::<u128>()
+            .map_err(|_| format!("invalid debit_account_id: {}", t.debit_account_id))?,
+        credit_account_id: t
+            .credit_account_id
+            .parse::<u128>()
+            .map_err(|_| format!("invalid credit_account_id: {}", t.credit_account_id))?,
+        amount: t
+            .amount
+            .parse::<u128>()
+            .map_err(|_| format!("invalid amount: {}", t.amount))?,
+        pending_id: t
+            .pending_id
+            .parse::<u128>()
+            .map_err(|_| format!("invalid pending_id: {}", t.pending_id))?,
+        user_data_128: t
+            .user_data_128
+            .parse::<u128>()
+            .map_err(|_| format!("invalid user_data_128: {}", t.user_data_128))?,
+        user_data_64: t.user_data_64,
+        user_data_32: t.user_data_32,
+        timeout: t.timeout,
+        ledger: t.ledger,
+        code: t.code as u16,
+        flags: tb_reader::TransferFlags::from(t.flags as u16),
+        timestamp: t.timestamp,
+    })
 }
 
 impl ManagerNodeService {
