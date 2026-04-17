@@ -5,12 +5,14 @@ use crate::proto::{
     FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse,
     GetMigrationAccountsRequest, GetMigrationAccountsResponse,
     GetMigrationSyntheticTransfersRequest, GetMigrationSyntheticTransfersResponse,
-    GetStatusRequest, GetStatusResponse, LedgerSummary, LogEntry, LogLevel, MigrationProgress,
-    ModifyBackupConfigRequest, ModifyBackupConfigResponse, PlanMigrationRequest,
-    PlanMigrationResponse, ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse,
-    ReadTransfersRequest, ReadTransfersResponse, StartBackupRequest, StartBackupResponse,
-    StopBackupRequest, StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord,
-    TransferRecord, TriggerBackupRequest, TriggerBackupResponse, manager_node_server::ManagerNode,
+    GetStatusRequest, GetStatusResponse, ImportCsvTransfersRequest, LedgerSummary, LogEntry,
+    LogLevel, MigrationProgress, ModifyBackupConfigRequest, ModifyBackupConfigResponse,
+    PlanCsvMigrationRequest, PlanCsvMigrationResponse, PlanMigrationRequest, PlanMigrationResponse,
+    ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest,
+    ReadTransfersResponse, StartBackupRequest, StartBackupResponse, StopBackupRequest,
+    StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord, TransferRecord,
+    TriggerBackupRequest, TriggerBackupResponse, UploadCsvTransfersRequest,
+    UploadCsvTransfersResponse, manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -50,6 +52,9 @@ pub struct NodeState {
     pub cron_schedule_tx: Arc<watch::Sender<Option<String>>>,
     /// Cached migration plan populated by PlanMigration for drill-down RPCs.
     pub cached_migration: Arc<RwLock<Option<CachedMigrationPlan>>>,
+    /// Cached CSV transfers populated by UploadCsvTransfers for pre-flight
+    /// review (PlanCsvMigration) and execution (ImportCsvTransfers).
+    pub cached_csv_transfers: Arc<RwLock<Vec<tb_reader::Transfer>>>,
 }
 
 /// gRPC service for a single manager node.
@@ -974,9 +979,10 @@ impl ManagerNode for ManagerNodeService {
         }
 
         let cutoff_ts = req.cutoff_ts;
+        let accounts_only = req.accounts_only;
         let data_file = self.state.manager_state.read().await.backup_file.clone();
         info!(
-            "ExecuteMigration: cluster_id={} addresses={} source={} cutoff_ts={cutoff_ts}",
+            "ExecuteMigration: cluster_id={} addresses={} source={} cutoff_ts={cutoff_ts} accounts_only={accounts_only}",
             req.new_cluster_id, req.new_addresses, data_file
         );
 
@@ -998,14 +1004,32 @@ impl ManagerNode for ManagerNodeService {
                     ));
                 }
 
-                if cutoff_ts > 0 {
+                let mut plan = if cutoff_ts > 0 {
                     let windowed = read_all_transfers_since(&df, cutoff_ts)?;
-                    Ok(tb_compressor::BalancePlan::build_windowed(
-                        accounts, windowed, cutoff_ts,
-                    ))
+                    tb_compressor::BalancePlan::build_windowed(accounts, windowed, cutoff_ts)
                 } else {
-                    Ok(tb_compressor::BalancePlan::build(accounts))
+                    tb_compressor::BalancePlan::build(accounts)
+                };
+
+                // If accounts_only, strip all transfers — accounts must still have
+                // their final balances derived, but they'll be imported with
+                // zeroed posted/pending fields and balances filled separately
+                // (e.g., by ImportCsvTransfers).
+                if accounts_only {
+                    plan.synthetic_transfers.clear();
+                    plan.windowed_transfers.clear();
+                    plan.genesis_accounts.clear();
+                    // Reset each regular account's balances to zero so the target
+                    // cluster starts fresh — transfers from CSV will populate them.
+                    for acc in &mut plan.regular_accounts {
+                        acc.debits_posted = 0;
+                        acc.credits_posted = 0;
+                        acc.debits_pending = 0;
+                        acc.credits_pending = 0;
+                    }
                 }
+
+                Ok(plan)
             }
         })
         .await
@@ -1033,6 +1057,9 @@ impl ManagerNode for ManagerNodeService {
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
 
+        // Error channel for connection/import failures.
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel::<String>();
+
         // Spawn the import task.
         tokio::spawn(async move {
             let importer =
@@ -1040,12 +1067,16 @@ impl ManagerNode for ManagerNodeService {
                     Ok(imp) => imp,
                     Err(e) => {
                         tracing::error!("ExecuteMigration: failed to connect to new cluster: {e}");
+                        let _ = error_tx.send(format!("{e}"));
                         return;
                     }
                 };
 
             if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
                 tracing::error!("ExecuteMigration: import failed: {e}");
+                let _ = error_tx.send(format!("{e}"));
+            } else {
+                let _ = error_tx.send(String::new());
             }
         });
 
@@ -1061,16 +1092,251 @@ impl ManagerNode for ManagerNodeService {
                 });
             }
             // Channel closed — import is done (or errored).
+            let error_msg = error_rx.await.unwrap_or_default();
             yield Ok(MigrationProgress {
                 phase: "done".into(),
                 imported: 0,
                 total: 0,
                 done: true,
-                error: String::new(),
+                error: error_msg,
             });
         };
 
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    type ImportCsvTransfersStream =
+        Pin<Box<dyn Stream<Item = Result<MigrationProgress, Status>> + Send + 'static>>;
+
+    async fn import_csv_transfers(
+        &self,
+        request: Request<ImportCsvTransfersRequest>,
+    ) -> Result<Response<Self::ImportCsvTransfersStream>, Status> {
+        let req = request.into_inner();
+
+        if req.target_addresses.is_empty() {
+            return Err(Status::invalid_argument(
+                "target_addresses must not be empty",
+            ));
+        }
+
+        let new_cluster_id: u128 = req.target_cluster_id.parse().map_err(|_| {
+            Status::invalid_argument(format!(
+                "invalid target_cluster_id {:?}: expected decimal u128",
+                req.target_cluster_id
+            ))
+        })?;
+        let cutoff_ts = req.cutoff_ts;
+
+        // If transfers are provided inline, use them. Otherwise fall back to the
+        // cache populated by UploadCsvTransfers.
+        let transfers: Vec<tb_reader::Transfer> = if !req.transfers.is_empty() {
+            req.transfers
+                .into_iter()
+                .map(proto_to_transfer)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| Status::invalid_argument(format!("invalid transfer: {e}")))?
+        } else {
+            let cached = self.state.cached_csv_transfers.read().await;
+            if cached.is_empty() {
+                return Err(Status::failed_precondition(
+                    "no transfers provided and no cached CSV transfers. \
+                     Call UploadCsvTransfers first or include transfers in the request.",
+                ));
+            }
+            cached.clone()
+        };
+
+        info!(
+            "ImportCsvTransfers: {} transfers → cluster {} @ {} (cutoff_ts={cutoff_ts})",
+            transfers.len(),
+            new_cluster_id,
+            req.target_addresses
+        );
+
+        // Build plan from CSV transfers only. No accounts, no genesis — assume they
+        // already exist in the target cluster (e.g., from a prior ExecuteMigration
+        // with accounts_only=true). Pre-cutoff transfers get aggregated per
+        // (debit, credit, ledger) into synthetic transfers with code=999.
+        // Post-cutoff transfers are replayed verbatim as windowed transfers.
+        let plan = build_plan_from_csv(transfers, cutoff_ts);
+
+        info!(
+            "ImportCsvTransfers plan: {} synthetic transfers, {} windowed transfers",
+            plan.synthetic_transfers.len(),
+            plan.windowed_transfers.len()
+        );
+
+        let target_addresses = req.target_addresses.clone();
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
+
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let importer =
+                match tb_compressor::Importer::connect(new_cluster_id, &target_addresses).await {
+                    Ok(imp) => imp,
+                    Err(e) => {
+                        tracing::error!(
+                            "ImportCsvTransfers: failed to connect to target cluster: {e}"
+                        );
+                        let _ = error_tx.send(format!("{e}"));
+                        return;
+                    }
+                };
+
+            if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
+                tracing::error!("ImportCsvTransfers: import failed: {e}");
+                let _ = error_tx.send(format!("{e}"));
+            } else {
+                let _ = error_tx.send(String::new());
+            }
+        });
+
+        let stream = async_stream::stream! {
+            while let Some(p) = progress_rx.recv().await {
+                yield Ok(MigrationProgress {
+                    phase: p.phase,
+                    imported: p.imported,
+                    total: p.total,
+                    done: false,
+                    error: String::new(),
+                });
+            }
+            let error_msg = error_rx.await.unwrap_or_default();
+            yield Ok(MigrationProgress {
+                phase: "done".into(),
+                imported: 0,
+                total: 0,
+                done: true,
+                error: error_msg,
+            });
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn upload_csv_transfers(
+        &self,
+        request: Request<UploadCsvTransfersRequest>,
+    ) -> Result<Response<UploadCsvTransfersResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.transfers.is_empty() {
+            return Err(Status::invalid_argument("transfers must not be empty"));
+        }
+
+        // Convert proto TransferRecords → tb_reader::Transfer.
+        let transfers: Vec<tb_reader::Transfer> = req
+            .transfers
+            .into_iter()
+            .map(proto_to_transfer)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("invalid transfer: {e}")))?;
+
+        let count = transfers.len() as u64;
+        let min_timestamp = transfers.iter().map(|t| t.timestamp).min().unwrap_or(0);
+        let max_timestamp = transfers.iter().map(|t| t.timestamp).max().unwrap_or(0);
+
+        info!(
+            "UploadCsvTransfers: cached {} transfers (min_ts={} max_ts={})",
+            count, min_timestamp, max_timestamp
+        );
+
+        *self.state.cached_csv_transfers.write().await = transfers;
+
+        Ok(Response::new(UploadCsvTransfersResponse {
+            count,
+            min_timestamp,
+            max_timestamp,
+        }))
+    }
+
+    async fn plan_csv_migration(
+        &self,
+        request: Request<PlanCsvMigrationRequest>,
+    ) -> Result<Response<PlanCsvMigrationResponse>, Status> {
+        let req = request.into_inner();
+        let cutoff_ts = req.cutoff_ts;
+
+        let cached = self.state.cached_csv_transfers.read().await;
+        if cached.is_empty() {
+            return Err(Status::failed_precondition(
+                "no CSV transfers uploaded. Call UploadCsvTransfers first.",
+            ));
+        }
+
+        let total_transfers = cached.len() as u64;
+        let min_timestamp = cached.iter().map(|t| t.timestamp).min().unwrap_or(0);
+        let max_timestamp = cached.iter().map(|t| t.timestamp).max().unwrap_or(0);
+
+        // Count pre-cutoff vs post-cutoff transfers.
+        let (pre_cutoff_transfers, windowed_transfers): (u64, u64) = if cutoff_ts > 0 {
+            let pre = cached.iter().filter(|t| t.timestamp < cutoff_ts).count() as u64;
+            let post = total_transfers - pre;
+            (pre, post)
+        } else {
+            (0, total_transfers)
+        };
+
+        // Aggregate pre-cutoff to count distinct synthetic transfers.
+        let synthetic_transfers: u64 = if cutoff_ts > 0 {
+            let mut keys: std::collections::HashSet<(u128, u128, u32)> =
+                std::collections::HashSet::new();
+            for t in cached.iter().filter(|t| t.timestamp < cutoff_ts) {
+                keys.insert((t.debit_account_id, t.credit_account_id, t.ledger));
+            }
+            keys.len() as u64
+        } else {
+            0
+        };
+
+        // Per-ledger summaries (all cached transfers).
+        let mut ledger_map: std::collections::BTreeMap<u32, (u64, u128, u128)> =
+            std::collections::BTreeMap::new();
+        let mut unique_accounts: std::collections::HashSet<u128> =
+            std::collections::HashSet::new();
+        for t in cached.iter() {
+            let entry = ledger_map.entry(t.ledger).or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(t.amount);
+            entry.2 = entry.2.saturating_add(t.amount);
+            unique_accounts.insert(t.debit_account_id);
+            unique_accounts.insert(t.credit_account_id);
+        }
+        let ledger_count = ledger_map.len() as u32;
+        let ledger_summaries: Vec<LedgerSummary> = ledger_map
+            .into_iter()
+            .map(|(ledger, (count, debits, credits))| LedgerSummary {
+                ledger,
+                account_count: count,
+                total_debits_posted: debits.to_string(),
+                total_credits_posted: credits.to_string(),
+            })
+            .collect();
+
+        info!(
+            "PlanCsvMigration: total={} pre_cutoff={} windowed={} synthetic={} ledgers={} accounts={}",
+            total_transfers,
+            pre_cutoff_transfers,
+            windowed_transfers,
+            synthetic_transfers,
+            ledger_count,
+            unique_accounts.len(),
+        );
+
+        Ok(Response::new(PlanCsvMigrationResponse {
+            total_transfers,
+            pre_cutoff_transfers,
+            synthetic_transfers,
+            windowed_transfers,
+            ledgers: ledger_count,
+            ledger_summaries,
+            unique_accounts: unique_accounts.len() as u64,
+            min_timestamp,
+            max_timestamp,
+        }))
     }
 }
 
@@ -1164,6 +1430,91 @@ fn read_all_transfers_since(
     Ok(windowed)
 }
 
+/// Build a BalancePlan purely from CSV transfers, splitting by `cutoff_ts`.
+///
+/// - Transfers with `timestamp < cutoff_ts` are aggregated by `(debit_account_id,
+///   credit_account_id, ledger)` into synthetic transfers with `code=999`.
+/// - Transfers with `timestamp >= cutoff_ts` are replayed verbatim as windowed
+///   transfers.
+/// - When `cutoff_ts == 0`, all transfers are replayed verbatim (no compression).
+///
+/// No genesis accounts or regular accounts are created — assume they already
+/// exist in the target cluster.
+fn build_plan_from_csv(
+    mut transfers: Vec<tb_reader::Transfer>,
+    cutoff_ts: u64,
+) -> tb_compressor::BalancePlan {
+    use std::collections::HashMap;
+
+    // No-cutoff case: replay everything verbatim.
+    if cutoff_ts == 0 {
+        transfers.sort_by_key(|t| t.timestamp);
+        dedupe_timestamps(&mut transfers, 0);
+        return tb_compressor::BalancePlan {
+            genesis_accounts: vec![],
+            regular_accounts: vec![],
+            synthetic_transfers: vec![],
+            windowed_transfers: transfers,
+        };
+    }
+
+    // Split by cutoff.
+    let (pre, mut post): (Vec<_>, Vec<_>) = transfers
+        .into_iter()
+        .partition(|t| t.timestamp < cutoff_ts);
+
+    // Aggregate pre-cutoff transfers by (debit, credit, ledger).
+    let mut agg: HashMap<(u128, u128, u32), u128> = HashMap::new();
+    for t in &pre {
+        let key = (t.debit_account_id, t.credit_account_id, t.ledger);
+        *agg.entry(key).or_insert(0u128) += t.amount;
+    }
+
+    // Build synthetic transfers with sequential IDs and timestamps placed
+    // in [cutoff_ts - N, cutoff_ts).
+    let num = agg.len() as u64;
+    let base_ts = cutoff_ts.saturating_sub(num);
+    let mut synthetic_transfers: Vec<tb_compressor::SyntheticTransfer> = agg
+        .into_iter()
+        .enumerate()
+        .map(
+            |(i, ((debit, credit, ledger), amount))| tb_compressor::SyntheticTransfer {
+                id: (i as u128) + 1,
+                debit_account_id: debit,
+                credit_account_id: credit,
+                amount,
+                ledger,
+                code: 999,
+                timestamp: base_ts + (i as u64),
+            },
+        )
+        .collect();
+    synthetic_transfers.sort_by_key(|t| t.timestamp);
+
+    // Windowed: sort + deduplicate timestamps starting from cutoff_ts.
+    post.sort_by_key(|t| t.timestamp);
+    dedupe_timestamps(&mut post, cutoff_ts.saturating_sub(1));
+
+    tb_compressor::BalancePlan {
+        genesis_accounts: vec![],
+        regular_accounts: vec![],
+        synthetic_transfers,
+        windowed_transfers: post,
+    }
+}
+
+/// Ensure timestamps are strictly increasing. Assumes `transfers` is already
+/// sorted by timestamp. Any timestamp `<= prev` is bumped to `prev + 1`.
+fn dedupe_timestamps(transfers: &mut [tb_reader::Transfer], start_prev: u64) {
+    let mut prev = start_prev;
+    for t in transfers.iter_mut() {
+        if t.timestamp <= prev {
+            t.timestamp = prev + 1;
+        }
+        prev = t.timestamp;
+    }
+}
+
 fn account_to_proto(a: tb_reader::Account) -> AccountRecord {
     AccountRecord {
         id: a.id.to_string(),
@@ -1197,6 +1548,39 @@ fn transfer_to_proto(t: tb_reader::Transfer) -> TransferRecord {
         flags: t.flags.raw() as u32,
         timestamp: t.timestamp,
     }
+}
+
+fn proto_to_transfer(t: TransferRecord) -> Result<tb_reader::Transfer, String> {
+    Ok(tb_reader::Transfer {
+        id: t.id.parse::<u128>().map_err(|_| format!("invalid id: {}", t.id))?,
+        debit_account_id: t
+            .debit_account_id
+            .parse::<u128>()
+            .map_err(|_| format!("invalid debit_account_id: {}", t.debit_account_id))?,
+        credit_account_id: t
+            .credit_account_id
+            .parse::<u128>()
+            .map_err(|_| format!("invalid credit_account_id: {}", t.credit_account_id))?,
+        amount: t
+            .amount
+            .parse::<u128>()
+            .map_err(|_| format!("invalid amount: {}", t.amount))?,
+        pending_id: t
+            .pending_id
+            .parse::<u128>()
+            .map_err(|_| format!("invalid pending_id: {}", t.pending_id))?,
+        user_data_128: t
+            .user_data_128
+            .parse::<u128>()
+            .map_err(|_| format!("invalid user_data_128: {}", t.user_data_128))?,
+        user_data_64: t.user_data_64,
+        user_data_32: t.user_data_32,
+        timeout: 0, // imported transfer could not have timeout
+        ledger: t.ledger,
+        code: t.code as u16,
+        flags: tb_reader::TransferFlags::from(t.flags as u16),
+        timestamp: t.timestamp,
+    })
 }
 
 impl ManagerNodeService {

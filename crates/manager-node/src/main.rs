@@ -158,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         backup_lock: Arc::new(tokio::sync::Mutex::new(())),
         cron_schedule_tx: cron_tx,
         cached_migration: Arc::new(tokio::sync::RwLock::new(None)),
+        cached_csv_transfers: Arc::new(tokio::sync::RwLock::new(Vec::new())),
     };
     let grpc_service = ManagerNodeService::new(node_state);
 
@@ -165,9 +166,12 @@ async fn main() -> anyhow::Result<()> {
     info!("gRPC server listening on {}", grpc_addr);
 
     tokio::spawn(async move {
+        // 128 MiB limit to support ImportCsvTransfers with large transfer payloads.
+        let svc = ManagerNodeServer::new(grpc_service)
+            .max_decoding_message_size(128 * 1024 * 1024);
         if let Err(e) = Server::builder()
             .accept_http1(true)
-            .add_service(tonic_web::enable(ManagerNodeServer::new(grpc_service)))
+            .add_service(tonic_web::enable(svc))
             .serve(grpc_addr)
             .await
         {
