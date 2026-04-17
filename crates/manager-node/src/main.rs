@@ -158,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         backup_lock: Arc::new(tokio::sync::Mutex::new(())),
         cron_schedule_tx: cron_tx,
         cached_migration: Arc::new(tokio::sync::RwLock::new(None)),
+        cached_csv_transfers: Arc::new(tokio::sync::RwLock::new(Vec::new())),
     };
     let grpc_service = ManagerNodeService::new(node_state);
 
