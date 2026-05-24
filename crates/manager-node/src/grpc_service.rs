@@ -221,6 +221,8 @@ impl CompiledAccountFilter {
 }
 
 /// Same compiled-once design as [`CompiledAccountFilter`] but for transfers.
+/// Adds `debit_account_id` / `credit_account_id` over the account variant —
+/// mirrors TigerBeetle's `get_account_transfers` op.
 #[derive(Debug, Default)]
 struct CompiledTransferFilter {
     id: Option<u128>,
@@ -232,6 +234,8 @@ struct CompiledTransferFilter {
     user_data_128: Option<u128>,
     timestamp_min: Option<u64>,
     timestamp_max: Option<u64>,
+    debit_account_id: Option<u128>,
+    credit_account_id: Option<u128>,
 }
 
 impl CompiledTransferFilter {
@@ -248,6 +252,20 @@ impl CompiledTransferFilter {
             ),
             None => None,
         };
+        let debit_account_id = match f.debit_account_id.as_deref() {
+            Some(s) => Some(
+                s.parse::<u128>()
+                    .map_err(|_| format!("invalid debit_account_id: {s}"))?,
+            ),
+            None => None,
+        };
+        let credit_account_id = match f.credit_account_id.as_deref() {
+            Some(s) => Some(
+                s.parse::<u128>()
+                    .map_err(|_| format!("invalid credit_account_id: {s}"))?,
+            ),
+            None => None,
+        };
         let out = CompiledTransferFilter {
             id,
             ledger: f.ledger,
@@ -258,6 +276,8 @@ impl CompiledTransferFilter {
             user_data_128,
             timestamp_min: f.timestamp_min,
             timestamp_max: f.timestamp_max,
+            debit_account_id,
+            credit_account_id,
         };
         if out.is_empty() {
             Ok(None)
@@ -276,6 +296,8 @@ impl CompiledTransferFilter {
             && self.user_data_128.is_none()
             && self.timestamp_min.is_none()
             && self.timestamp_max.is_none()
+            && self.debit_account_id.is_none()
+            && self.credit_account_id.is_none()
     }
 
     fn matches(&self, t: &tb_reader::Transfer) -> bool {
@@ -321,6 +343,16 @@ impl CompiledTransferFilter {
         }
         if let Some(tmax) = self.timestamp_max {
             if t.timestamp > tmax {
+                return false;
+            }
+        }
+        if let Some(d) = self.debit_account_id {
+            if t.debit_account_id != d {
+                return false;
+            }
+        }
+        if let Some(c) = self.credit_account_id {
+            if t.credit_account_id != c {
                 return false;
             }
         }

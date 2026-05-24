@@ -342,7 +342,8 @@ message ReadAccountsResponse {
 }
 
 // Optional filter for ReadTransfers / ReadLsmTransfers / ReadWalTransfers.
-// Same shape and semantics as AccountFilter.
+// Shares the AccountFilter shape and adds debit/credit account-id filters
+// (mirrors TigerBeetle's `get_account_transfers` op).
 message TransferFilter {
     optional string id = 1;
     optional uint32 ledger = 2;
@@ -353,6 +354,10 @@ message TransferFilter {
     optional string user_data_128 = 7;
     optional uint64 timestamp_min = 8;
     optional uint64 timestamp_max = 9;
+    // Match transfers whose debit_account_id equals this u128 (decimal string).
+    optional string debit_account_id = 10;
+    // Match transfers whose credit_account_id equals this u128 (decimal string).
+    optional string credit_account_id = 11;
 }
 
 message ReadTransfersRequest {

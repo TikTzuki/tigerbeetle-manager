@@ -11,9 +11,11 @@ A comprehensive Rust workspace for TigerBeetle database management, including:
 ### Install and run the manager server
 
 ```bash
-cargo build --release --bin tigerbeetle-manager-server
+cargo build --release --bin tb-manager-node
 
-./target/release/tigerbeetle-manager-server \
+./target/release/tb-manager-node --grpc-port=9091 -- start --addresses=0.0.0.0:3001 data/0_0.tigerbeetle
+
+./target/release/tb-manager-node \
   --interval-secs 3600 \
   --backup-file /data/0_0.tigerbeetle \
   --bucket my-s3-bucket \
