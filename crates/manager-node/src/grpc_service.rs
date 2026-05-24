@@ -1110,16 +1110,18 @@ impl ManagerNode for ManagerNodeService {
             move || -> Result<tb_compressor::BalancePlan, String> {
                 let accounts = read_all_accounts(&df)?;
 
-                // Safety check: refuse if any account has pending balances.
+                // Pre-flight observation only — proceed even if pending balances exist.
+                // PlanMigration already surfaces these via `safe`/`pending_accounts` so the
+                // operator can review them in the UI before clicking Execute.
                 let pending_count = accounts
                     .iter()
                     .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
                     .count();
                 if pending_count > 0 {
-                    return Err(format!(
-                        "{pending_count} account(s) have non-zero pending balances. \
-                         Void all pending transfers before migration."
-                    ));
+                    warn!(
+                        "ExecuteMigration proceeding with {pending_count} account(s) holding \
+                         non-zero pending balances; these will be migrated as-is."
+                    );
                 }
 
                 let mut plan = if cutoff_ts > 0 {
