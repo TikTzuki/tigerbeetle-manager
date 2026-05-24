@@ -1,7 +1,7 @@
 //! gRPC service implementation bridging proto types to the manager crate.
 
 use crate::proto::{
-    self, AccountRecord, BackupStatus, DataFileCapacity, ExecuteMigrationRequest,
+    self, AccountFilter, AccountRecord, BackupStatus, DataFileCapacity, ExecuteMigrationRequest,
     FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse,
     GetMigrationAccountsRequest, GetMigrationAccountsResponse,
     GetMigrationSyntheticTransfersRequest, GetMigrationSyntheticTransfersResponse,
@@ -10,8 +10,8 @@ use crate::proto::{
     PlanCsvMigrationRequest, PlanCsvMigrationResponse, PlanMigrationRequest, PlanMigrationResponse,
     ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest,
     ReadTransfersResponse, StartBackupRequest, StartBackupResponse, StopBackupRequest,
-    StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord, TransferRecord,
-    TriggerBackupRequest, TriggerBackupResponse, UploadCsvTransfersRequest,
+    StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord, TransferFilter,
+    TransferRecord, TriggerBackupRequest, TriggerBackupResponse, UploadCsvTransfersRequest,
     UploadCsvTransfersResponse, manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
@@ -89,6 +89,242 @@ fn persist_cron(config_path: &PathBuf, cron: Option<&str>) {
         );
     } else {
         info!("Cron schedule {:?} persisted to {:?}", cron, config_path);
+    }
+}
+
+/// Which slice of the data file to scan when reading accounts.
+#[derive(Clone, Copy, Debug)]
+enum AccountSource {
+    /// Checkpointed accounts in the LSM.
+    Lsm,
+    /// Post-checkpoint accounts in the WAL.
+    Wal,
+}
+
+/// Which slice of the data file to scan when reading transfers.
+#[derive(Clone, Copy, Debug)]
+enum TransferSource {
+    Lsm,
+    Wal,
+}
+
+/// Filter parsed once from a proto `AccountFilter` so per-record matching
+/// is allocation-free. Returned by [`CompiledAccountFilter::compile`].
+#[derive(Debug, Default)]
+struct CompiledAccountFilter {
+    id: Option<u128>,
+    ledger: Option<u32>,
+    code: Option<u32>,
+    flags: Option<u32>,
+    user_data_32: Option<u32>,
+    user_data_64: Option<u64>,
+    user_data_128: Option<u128>,
+    timestamp_min: Option<u64>,
+    timestamp_max: Option<u64>,
+}
+
+impl CompiledAccountFilter {
+    /// Parse + validate. Returns `Ok(None)` when the proto filter is absent or
+    /// has no fields set (caller should skip filtering). Returns `Err` for
+    /// invalid u128 strings.
+    fn compile(f: Option<&AccountFilter>) -> Result<Option<Self>, String> {
+        let Some(f) = f else { return Ok(None) };
+        let id = match f.id.as_deref() {
+            Some(s) => Some(s.parse::<u128>().map_err(|_| format!("invalid id: {s}"))?),
+            None => None,
+        };
+        let user_data_128 = match f.user_data_128.as_deref() {
+            Some(s) => Some(
+                s.parse::<u128>()
+                    .map_err(|_| format!("invalid user_data_128: {s}"))?,
+            ),
+            None => None,
+        };
+        let out = CompiledAccountFilter {
+            id,
+            ledger: f.ledger,
+            code: f.code,
+            flags: f.flags,
+            user_data_32: f.user_data_32,
+            user_data_64: f.user_data_64,
+            user_data_128,
+            timestamp_min: f.timestamp_min,
+            timestamp_max: f.timestamp_max,
+        };
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.id.is_none()
+            && self.ledger.is_none()
+            && self.code.is_none()
+            && self.flags.is_none()
+            && self.user_data_32.is_none()
+            && self.user_data_64.is_none()
+            && self.user_data_128.is_none()
+            && self.timestamp_min.is_none()
+            && self.timestamp_max.is_none()
+    }
+
+    fn matches(&self, a: &tb_reader::Account) -> bool {
+        if let Some(id) = self.id {
+            if a.id != id {
+                return false;
+            }
+        }
+        if let Some(l) = self.ledger {
+            if a.ledger != l {
+                return false;
+            }
+        }
+        if let Some(c) = self.code {
+            if a.code as u32 != c {
+                return false;
+            }
+        }
+        if let Some(fl) = self.flags {
+            if a.flags.raw() as u32 != fl {
+                return false;
+            }
+        }
+        if let Some(u) = self.user_data_32 {
+            if a.user_data_32 != u {
+                return false;
+            }
+        }
+        if let Some(u) = self.user_data_64 {
+            if a.user_data_64 != u {
+                return false;
+            }
+        }
+        if let Some(u) = self.user_data_128 {
+            if a.user_data_128 != u {
+                return false;
+            }
+        }
+        if let Some(tmin) = self.timestamp_min {
+            if a.timestamp < tmin {
+                return false;
+            }
+        }
+        if let Some(tmax) = self.timestamp_max {
+            if a.timestamp > tmax {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Same compiled-once design as [`CompiledAccountFilter`] but for transfers.
+#[derive(Debug, Default)]
+struct CompiledTransferFilter {
+    id: Option<u128>,
+    ledger: Option<u32>,
+    code: Option<u32>,
+    flags: Option<u32>,
+    user_data_32: Option<u32>,
+    user_data_64: Option<u64>,
+    user_data_128: Option<u128>,
+    timestamp_min: Option<u64>,
+    timestamp_max: Option<u64>,
+}
+
+impl CompiledTransferFilter {
+    fn compile(f: Option<&TransferFilter>) -> Result<Option<Self>, String> {
+        let Some(f) = f else { return Ok(None) };
+        let id = match f.id.as_deref() {
+            Some(s) => Some(s.parse::<u128>().map_err(|_| format!("invalid id: {s}"))?),
+            None => None,
+        };
+        let user_data_128 = match f.user_data_128.as_deref() {
+            Some(s) => Some(
+                s.parse::<u128>()
+                    .map_err(|_| format!("invalid user_data_128: {s}"))?,
+            ),
+            None => None,
+        };
+        let out = CompiledTransferFilter {
+            id,
+            ledger: f.ledger,
+            code: f.code,
+            flags: f.flags,
+            user_data_32: f.user_data_32,
+            user_data_64: f.user_data_64,
+            user_data_128,
+            timestamp_min: f.timestamp_min,
+            timestamp_max: f.timestamp_max,
+        };
+        if out.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.id.is_none()
+            && self.ledger.is_none()
+            && self.code.is_none()
+            && self.flags.is_none()
+            && self.user_data_32.is_none()
+            && self.user_data_64.is_none()
+            && self.user_data_128.is_none()
+            && self.timestamp_min.is_none()
+            && self.timestamp_max.is_none()
+    }
+
+    fn matches(&self, t: &tb_reader::Transfer) -> bool {
+        if let Some(id) = self.id {
+            if t.id != id {
+                return false;
+            }
+        }
+        if let Some(l) = self.ledger {
+            if t.ledger != l {
+                return false;
+            }
+        }
+        if let Some(c) = self.code {
+            if t.code as u32 != c {
+                return false;
+            }
+        }
+        if let Some(fl) = self.flags {
+            if t.flags.raw() as u32 != fl {
+                return false;
+            }
+        }
+        if let Some(u) = self.user_data_32 {
+            if t.user_data_32 != u {
+                return false;
+            }
+        }
+        if let Some(u) = self.user_data_64 {
+            if t.user_data_64 != u {
+                return false;
+            }
+        }
+        if let Some(u) = self.user_data_128 {
+            if t.user_data_128 != u {
+                return false;
+            }
+        }
+        if let Some(tmin) = self.timestamp_min {
+            if t.timestamp < tmin {
+                return false;
+            }
+        }
+        if let Some(tmax) = self.timestamp_max {
+            if t.timestamp > tmax {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -447,198 +683,48 @@ impl ManagerNode for ManagerNodeService {
         &self,
         request: Request<ReadAccountsRequest>,
     ) -> Result<Response<ReadAccountsResponse>, Status> {
-        let req = request.into_inner();
-        let page = req.page as usize;
-        let limit = (req.limit as usize).min(500).max(1);
-
-        let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("ReadAccounts (combined): page={page} limit={limit} file=\"{data_file}\"");
-
-        let accounts = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut reader = DataFileReader::open(&data_file)
-                .map_err(|e| format!("open data file \"{data_file}\": {e}"))?;
-            reader
-                .read_lsm_accounts(page, limit)
-                .map_err(|e| format!("read accounts: {e}"))
-        })
-        .await
-        .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| {
-            warn!("ReadAccounts error: {e}");
-            Status::internal(e)
-        })?;
-
-        let records = accounts.into_iter().map(account_to_proto).collect();
-        Ok(Response::new(ReadAccountsResponse {
-            accounts: records,
-            page: req.page,
-            limit: req.limit,
-        }))
+        self.read_accounts_impl(request, AccountSource::Lsm, "ReadAccounts")
+            .await
     }
 
     async fn read_transfers(
         &self,
         request: Request<ReadTransfersRequest>,
     ) -> Result<Response<ReadTransfersResponse>, Status> {
-        let req = request.into_inner();
-        let page = req.page as usize;
-        let limit = (req.limit as usize).min(500).max(1);
-
-        let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("ReadTransfers (combined): page={page} limit={limit} file=\"{data_file}\"");
-
-        let transfers = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut reader = DataFileReader::open(&data_file)
-                .map_err(|e| format!("open data file \"{data_file}\": {e}"))?;
-            reader
-                .read_lsm_transfers(page, limit)
-                .map_err(|e| format!("read transfers: {e}"))
-        })
-        .await
-        .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| {
-            warn!("ReadTransfers error: {e}");
-            Status::internal(e)
-        })?;
-
-        let records = transfers.into_iter().map(transfer_to_proto).collect();
-        Ok(Response::new(ReadTransfersResponse {
-            transfers: records,
-            page: req.page,
-            limit: req.limit,
-        }))
+        self.read_transfers_impl(request, TransferSource::Lsm, "ReadTransfers")
+            .await
     }
 
     async fn read_lsm_accounts(
         &self,
         request: Request<ReadAccountsRequest>,
     ) -> Result<Response<ReadAccountsResponse>, Status> {
-        let req = request.into_inner();
-        let page = req.page as usize;
-        let limit = (req.limit as usize).min(500).max(1);
-
-        let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("ReadLsmAccounts: page={page} limit={limit} file=\"{data_file}\"");
-
-        let accounts = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut reader =
-                DataFileReader::open(&data_file).map_err(|e| format!("open data file: {e}"))?;
-            reader
-                .read_lsm_accounts(page, limit)
-                .map_err(|e| format!("read LSM accounts: {e}"))
-        })
-        .await
-        .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| {
-            warn!("ReadLsmAccounts error: {e}");
-            Status::internal(e)
-        })?;
-
-        let records = accounts.into_iter().map(account_to_proto).collect();
-        Ok(Response::new(ReadAccountsResponse {
-            accounts: records,
-            page: req.page,
-            limit: req.limit,
-        }))
+        self.read_accounts_impl(request, AccountSource::Lsm, "ReadLsmAccounts")
+            .await
     }
 
     async fn read_lsm_transfers(
         &self,
         request: Request<ReadTransfersRequest>,
     ) -> Result<Response<ReadTransfersResponse>, Status> {
-        let req = request.into_inner();
-        let page = req.page as usize;
-        let limit = (req.limit as usize).min(500).max(1);
-
-        let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("ReadLsmTransfers: page={page} limit={limit} file=\"{data_file}\"");
-
-        let transfers = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut reader =
-                DataFileReader::open(&data_file).map_err(|e| format!("open data file: {e}"))?;
-            reader
-                .read_lsm_transfers(page, limit)
-                .map_err(|e| format!("read LSM transfers: {e}"))
-        })
-        .await
-        .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| {
-            warn!("ReadLsmTransfers error: {e}");
-            Status::internal(e)
-        })?;
-
-        let records = transfers.into_iter().map(transfer_to_proto).collect();
-        Ok(Response::new(ReadTransfersResponse {
-            transfers: records,
-            page: req.page,
-            limit: req.limit,
-        }))
+        self.read_transfers_impl(request, TransferSource::Lsm, "ReadLsmTransfers")
+            .await
     }
 
     async fn read_wal_accounts(
         &self,
         request: Request<ReadAccountsRequest>,
     ) -> Result<Response<ReadAccountsResponse>, Status> {
-        let req = request.into_inner();
-        let page = req.page as usize;
-        let limit = (req.limit as usize).min(500).max(1);
-
-        let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("ReadWalAccounts: page={page} limit={limit} file=\"{data_file}\"");
-
-        let accounts = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut reader =
-                DataFileReader::open(&data_file).map_err(|e| format!("open data file: {e}"))?;
-            reader
-                .read_wal_accounts(page, limit)
-                .map_err(|e| format!("read WAL accounts: {e}"))
-        })
-        .await
-        .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| {
-            warn!("ReadWalAccounts error: {e}");
-            Status::internal(e)
-        })?;
-
-        let records = accounts.into_iter().map(account_to_proto).collect();
-        Ok(Response::new(ReadAccountsResponse {
-            accounts: records,
-            page: req.page,
-            limit: req.limit,
-        }))
+        self.read_accounts_impl(request, AccountSource::Wal, "ReadWalAccounts")
+            .await
     }
 
     async fn read_wal_transfers(
         &self,
         request: Request<ReadTransfersRequest>,
     ) -> Result<Response<ReadTransfersResponse>, Status> {
-        let req = request.into_inner();
-        let page = req.page as usize;
-        let limit = (req.limit as usize).min(500).max(1);
-
-        let data_file = self.state.manager_state.read().await.backup_file.clone();
-        info!("ReadWalTransfers: page={page} limit={limit} file=\"{data_file}\"");
-
-        let transfers = tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut reader =
-                DataFileReader::open(&data_file).map_err(|e| format!("open data file: {e}"))?;
-            reader
-                .read_wal_transfers(page, limit)
-                .map_err(|e| format!("read WAL transfers: {e}"))
-        })
-        .await
-        .map_err(|e| Status::internal(format!("task join: {e}")))?
-        .map_err(|e| {
-            warn!("ReadWalTransfers error: {e}");
-            Status::internal(e)
-        })?;
-
-        let records = transfers.into_iter().map(transfer_to_proto).collect();
-        Ok(Response::new(ReadTransfersResponse {
-            transfers: records,
-            page: req.page,
-            limit: req.limit,
-        }))
+        self.read_transfers_impl(request, TransferSource::Wal, "ReadWalTransfers")
+            .await
     }
 
     async fn format_data_file(
@@ -1344,6 +1430,113 @@ impl ManagerNode for ManagerNodeService {
 // Private helpers on ManagerNodeService
 // ---------------------------------------------------------------------------
 
+/// Iterate one source (LSM or WAL) and return a single page of accounts.
+/// Used by the unfiltered path — pagination is lazy via `skip(...).take(...)`,
+/// nothing is materialized beyond the page. `total_count` is reported as 0
+/// (= unknown) since counting the full source would defeat the lazy iter.
+fn scan_accounts_unfiltered(
+    reader: &mut DataFileReader,
+    source: AccountSource,
+    page: usize,
+    limit: usize,
+) -> Result<(Vec<tb_reader::Account>, u64), String> {
+    let accounts = match source {
+        AccountSource::Lsm => reader
+            .read_lsm_accounts(page, limit)
+            .map_err(|e| format!("read LSM accounts: {e}"))?,
+        AccountSource::Wal => reader
+            .read_wal_accounts(page, limit)
+            .map_err(|e| format!("read WAL accounts: {e}"))?,
+    };
+    Ok((accounts, 0))
+}
+
+/// Iterate one source and apply `filter` to every record. Collects all matches
+/// (so `total_count` is exact) and returns one page slice. Memory usage is
+/// proportional to the number of matches, not the full data file.
+fn scan_accounts_filtered(
+    reader: &mut DataFileReader,
+    source: AccountSource,
+    filter: &CompiledAccountFilter,
+    page: usize,
+    limit: usize,
+) -> Result<(Vec<tb_reader::Account>, u64), String> {
+    let matches: Vec<tb_reader::Account> = match source {
+        AccountSource::Lsm => {
+            let iter = match reader.iter_accounts() {
+                Ok(it) => it,
+                Err(tb_reader::ReaderError::NotCheckpointed { .. }) => return Ok((vec![], 0)),
+                Err(e) => return Err(format!("iter LSM accounts: {e}")),
+            };
+            iter.filter_map(|r| r.ok())
+                .filter(|a| filter.matches(a))
+                .collect()
+        }
+        AccountSource::Wal => {
+            let iter = reader
+                .iter_wal_accounts()
+                .map_err(|e| format!("iter WAL accounts: {e}"))?;
+            iter.filter_map(|r| r.ok())
+                .filter(|a| filter.matches(a))
+                .collect()
+        }
+    };
+    let total = matches.len() as u64;
+    let page_records = matches.into_iter().skip(page * limit).take(limit).collect();
+    Ok((page_records, total))
+}
+
+/// Transfer counterpart of [`scan_accounts_unfiltered`].
+fn scan_transfers_unfiltered(
+    reader: &mut DataFileReader,
+    source: TransferSource,
+    page: usize,
+    limit: usize,
+) -> Result<(Vec<tb_reader::Transfer>, u64), String> {
+    let transfers = match source {
+        TransferSource::Lsm => reader
+            .read_lsm_transfers(page, limit)
+            .map_err(|e| format!("read LSM transfers: {e}"))?,
+        TransferSource::Wal => reader
+            .read_wal_transfers(page, limit)
+            .map_err(|e| format!("read WAL transfers: {e}"))?,
+    };
+    Ok((transfers, 0))
+}
+
+/// Transfer counterpart of [`scan_accounts_filtered`].
+fn scan_transfers_filtered(
+    reader: &mut DataFileReader,
+    source: TransferSource,
+    filter: &CompiledTransferFilter,
+    page: usize,
+    limit: usize,
+) -> Result<(Vec<tb_reader::Transfer>, u64), String> {
+    let matches: Vec<tb_reader::Transfer> = match source {
+        TransferSource::Lsm => {
+            let iter = match reader.iter_transfers() {
+                Ok(it) => it,
+                Err(tb_reader::ReaderError::NotCheckpointed { .. }) => return Ok((vec![], 0)),
+                Err(e) => return Err(format!("iter LSM transfers: {e}")),
+            };
+            iter.filter_map(|r| r.ok())
+                .filter(|t| filter.matches(t))
+                .collect()
+        }
+        TransferSource::Wal => {
+            let iter = reader
+                .iter_wal_transfers()
+                .map_err(|e| format!("iter WAL transfers: {e}"))?;
+            iter.filter_map(|r| r.ok())
+                .filter(|t| filter.matches(t))
+                .collect()
+        }
+    };
+    let total = matches.len() as u64;
+    let page_records = matches.into_iter().skip(page * limit).take(limit).collect();
+    Ok((page_records, total))
+}
+
 /// Read ALL accounts from a data file by merging LSM (checkpointed) and WAL
 /// (pre-checkpoint) sources. WAL accounts override LSM accounts with the same
 /// ID since the WAL has more recent balances.
@@ -1584,6 +1777,100 @@ fn proto_to_transfer(t: TransferRecord) -> Result<tb_reader::Transfer, String> {
 }
 
 impl ManagerNodeService {
+    /// Shared implementation for `read_accounts` / `read_lsm_accounts` /
+    /// `read_wal_accounts`. When the request carries a non-empty `filter`,
+    /// the full source is scanned, all matching records collected, and the
+    /// response's `total_count` reports the full match count. When no filter
+    /// is set, pagination is lazy and `total_count` is 0 ("unknown").
+    async fn read_accounts_impl(
+        &self,
+        request: Request<ReadAccountsRequest>,
+        source: AccountSource,
+        op_label: &'static str,
+    ) -> Result<Response<ReadAccountsResponse>, Status> {
+        let req = request.into_inner();
+        let page = req.page as usize;
+        let limit = (req.limit as usize).clamp(1, 500);
+
+        let compiled = CompiledAccountFilter::compile(req.filter.as_ref())
+            .map_err(|e| Status::invalid_argument(format!("{op_label}: {e}")))?;
+
+        let data_file = self.state.manager_state.read().await.backup_file.clone();
+        info!(
+            "{op_label}: page={page} limit={limit} filter={} file=\"{data_file}\"",
+            if compiled.is_some() { "yes" } else { "no" }
+        );
+
+        let (accounts, total_count) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<tb_reader::Account>, u64), String> {
+                let mut reader = DataFileReader::open(&data_file)
+                    .map_err(|e| format!("open data file \"{data_file}\": {e}"))?;
+                match compiled {
+                    Some(filter) => scan_accounts_filtered(&mut reader, source, &filter, page, limit),
+                    None => scan_accounts_unfiltered(&mut reader, source, page, limit),
+                }
+            })
+            .await
+            .map_err(|e| Status::internal(format!("task join: {e}")))?
+            .map_err(|e| {
+                warn!("{op_label} error: {e}");
+                Status::internal(e)
+            })?;
+
+        let records = accounts.into_iter().map(account_to_proto).collect();
+        Ok(Response::new(ReadAccountsResponse {
+            accounts: records,
+            page: req.page,
+            limit: req.limit,
+            total_count,
+        }))
+    }
+
+    /// Same shape as [`read_accounts_impl`] but for transfers.
+    async fn read_transfers_impl(
+        &self,
+        request: Request<ReadTransfersRequest>,
+        source: TransferSource,
+        op_label: &'static str,
+    ) -> Result<Response<ReadTransfersResponse>, Status> {
+        let req = request.into_inner();
+        let page = req.page as usize;
+        let limit = (req.limit as usize).clamp(1, 500);
+
+        let compiled = CompiledTransferFilter::compile(req.filter.as_ref())
+            .map_err(|e| Status::invalid_argument(format!("{op_label}: {e}")))?;
+
+        let data_file = self.state.manager_state.read().await.backup_file.clone();
+        info!(
+            "{op_label}: page={page} limit={limit} filter={} file=\"{data_file}\"",
+            if compiled.is_some() { "yes" } else { "no" }
+        );
+
+        let (transfers, total_count) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<tb_reader::Transfer>, u64), String> {
+                let mut reader = DataFileReader::open(&data_file)
+                    .map_err(|e| format!("open data file \"{data_file}\": {e}"))?;
+                match compiled {
+                    Some(filter) => scan_transfers_filtered(&mut reader, source, &filter, page, limit),
+                    None => scan_transfers_unfiltered(&mut reader, source, page, limit),
+                }
+            })
+            .await
+            .map_err(|e| Status::internal(format!("task join: {e}")))?
+            .map_err(|e| {
+                warn!("{op_label} error: {e}");
+                Status::internal(e)
+            })?;
+
+        let records = transfers.into_iter().map(transfer_to_proto).collect();
+        Ok(Response::new(ReadTransfersResponse {
+            transfers: records,
+            page: req.page,
+            limit: req.limit,
+            total_count,
+        }))
+    }
+
     /// Spawn a background backup task using the current node credentials.
     /// Uses try_lock so it silently skips if a backup is already in progress.
     fn spawn_immediate_backup(&self) {

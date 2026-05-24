@@ -289,11 +289,29 @@ message LogEntry {
 
 // --- Data File Reader ---
 
+// Optional filter for ReadAccounts / ReadLsmAccounts / ReadWalAccounts.
+// Mirrors TigerBeetle's QueryFilter (Zig) — all fields are AND-combined.
+// An unset (None) field is skipped.
+message AccountFilter {
+    optional string id = 1;            // exact match, u128 as decimal string
+    optional uint32 ledger = 2;
+    optional uint32 code = 3;
+    optional uint32 flags = 4;         // exact match against raw flags bitfield
+    optional uint32 user_data_32 = 5;
+    optional uint64 user_data_64 = 6;
+    optional string user_data_128 = 7; // u128 as decimal string
+    optional uint64 timestamp_min = 8; // inclusive (nanoseconds since epoch)
+    optional uint64 timestamp_max = 9; // inclusive
+}
+
 message ReadAccountsRequest {
     // 0-based page index.
     uint32 page = 1;
     // Records per page (max 500).
     uint32 limit = 2;
+    // Optional filter — when set, the response is restricted to matching
+    // accounts and `total_count` reports the full match count.
+    AccountFilter filter = 3;
 }
 
 // A single account record decoded from the data file.
@@ -317,11 +335,30 @@ message ReadAccountsResponse {
     repeated AccountRecord accounts = 1;
     uint32 page = 2;
     uint32 limit = 3;
+    // Total number of accounts matching the filter across the full data
+    // source (LSM or WAL). Only populated when `filter` was set on the
+    // request; 0 means "unknown" (no filter, lazy pagination).
+    uint64 total_count = 4;
+}
+
+// Optional filter for ReadTransfers / ReadLsmTransfers / ReadWalTransfers.
+// Same shape and semantics as AccountFilter.
+message TransferFilter {
+    optional string id = 1;
+    optional uint32 ledger = 2;
+    optional uint32 code = 3;
+    optional uint32 flags = 4;
+    optional uint32 user_data_32 = 5;
+    optional uint64 user_data_64 = 6;
+    optional string user_data_128 = 7;
+    optional uint64 timestamp_min = 8;
+    optional uint64 timestamp_max = 9;
 }
 
 message ReadTransfersRequest {
     uint32 page = 1;
     uint32 limit = 2;
+    TransferFilter filter = 3;
 }
 
 // A single transfer record decoded from the data file.
@@ -345,6 +382,9 @@ message ReadTransfersResponse {
     repeated TransferRecord transfers = 1;
     uint32 page = 2;
     uint32 limit = 3;
+    // Total number of transfers matching the filter. Only populated when
+    // `filter` was set on the request; 0 means "unknown".
+    uint64 total_count = 4;
 }
 
 // --- Format ---
