@@ -1348,9 +1348,9 @@ impl ManagerNode for ManagerNodeService {
     ) -> Result<Response<UploadCsvTransfersResponse>, Status> {
         let req = request.into_inner();
 
-        if req.transfers.is_empty() {
-            return Err(Status::invalid_argument("transfers must not be empty"));
-        }
+        // Empty payloads are allowed — they clear the cache. Downstream
+        // operations (PlanCsvMigration, ImportCsvTransfers) still require a
+        // non-empty cache and will surface their own preconditions.
 
         // Convert proto TransferRecords → tb_reader::Transfer.
         let transfers: Vec<tb_reader::Transfer> = req
@@ -1470,9 +1470,9 @@ impl ManagerNode for ManagerNodeService {
     ) -> Result<Response<UploadCsvAccountsResponse>, Status> {
         let req = request.into_inner();
 
-        if req.accounts.is_empty() {
-            return Err(Status::invalid_argument("accounts must not be empty"));
-        }
+        // Empty payloads are allowed — they clear the cache. Downstream
+        // operations (PlanFilesMigration, ExecuteFilesMigration) still require
+        // a non-empty cache and will surface their own preconditions.
 
         let accounts: Vec<tb_reader::Account> = req
             .accounts
