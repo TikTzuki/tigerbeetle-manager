@@ -83,6 +83,25 @@ service ManagerNode {
     // unique accounts, unique ledgers, per-ledger summaries.
     // Requires a prior UploadCsvTransfers call.
     rpc PlanCsvMigration (PlanCsvMigrationRequest) returns (PlanCsvMigrationResponse);
+
+    // Upload CSV accounts to the manager node and cache them. Used by the
+    // files-only migration mode where both accounts and transfers come from
+    // uploaded CSV (no source cluster data file is read). Overwrites any
+    // existing cache.
+    rpc UploadCsvAccounts (UploadCsvAccountsRequest) returns (UploadCsvAccountsResponse);
+
+    // Pre-flight review of the uploaded CSV accounts + transfers combo for a
+    // given cutoff timestamp. Returns counts and per-ledger summaries that
+    // ExecuteFilesMigration would produce. Requires prior UploadCsvAccounts
+    // and UploadCsvTransfers calls.
+    rpc PlanFilesMigration (PlanFilesMigrationRequest) returns (PlanFilesMigrationResponse);
+
+    // Execute migration using only the cached uploaded accounts + transfers
+    // (no source data file). Builds a BalancePlan from the uploads (with the
+    // same cutoff_ts split as ExecuteMigration) and imports the resulting
+    // genesis + regular accounts and synthetic + windowed transfers into the
+    // target cluster. Streams progress updates back to the caller.
+    rpc ExecuteFilesMigration (ExecuteFilesMigrationRequest) returns (stream MigrationProgress);
 }
 
 message UploadCsvTransfersRequest {
@@ -120,6 +139,53 @@ message PlanCsvMigrationResponse {
     // Min / max timestamps in the cache.
     uint64 min_timestamp = 8;
     uint64 max_timestamp = 9;
+}
+
+message UploadCsvAccountsRequest {
+    repeated AccountRecord accounts = 1;
+}
+
+message UploadCsvAccountsResponse {
+    // Number of accounts cached.
+    uint64 count = 1;
+    // Number of distinct ledgers represented.
+    uint32 ledgers = 2;
+}
+
+message PlanFilesMigrationRequest {
+    // Optional cutoff timestamp (nanoseconds). Same semantics as PlanMigration:
+    // omit (= 0) for pure balance-snapshot migration; positive value enables
+    // synthetic-aggregation + windowed-replay around that cutoff.
+    uint64 cutoff_ts = 1;
+}
+
+message PlanFilesMigrationResponse {
+    // Total cached accounts.
+    uint64 accounts = 1;
+    // Cached accounts holding non-zero pending balances.
+    uint64 pending_accounts = 2;
+    // Synthetic transfers that will be generated (≤ 2 × accounts).
+    uint64 synthetic_transfers = 3;
+    // Transfers in the time window [cutoff_ts, ∞) replayed verbatim. 0 when cutoff_ts == 0.
+    uint64 windowed_transfers = 4;
+    // Total cached CSV transfers.
+    uint64 total_csv_transfers = 5;
+    // Distinct ledgers across the uploaded accounts.
+    uint32 ledgers = 6;
+    // Per-ledger account count + posted totals across the uploaded accounts.
+    repeated LedgerSummary ledger_summaries = 7;
+    // True iff `pending_accounts` == 0 (advisory).
+    bool safe = 8;
+}
+
+message ExecuteFilesMigrationRequest {
+    // Cluster ID of the target cluster (u128 as decimal string).
+    string target_cluster_id = 1;
+    // Comma-separated addresses of the target cluster.
+    string target_addresses = 2;
+    // Optional cutoff timestamp (nanoseconds). Must match the value used in
+    // PlanFilesMigration. Omit (= 0) for pure balance-snapshot migration.
+    uint64 cutoff_ts = 3;
 }
 
 message ImportCsvTransfersRequest {

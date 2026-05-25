@@ -1,18 +1,20 @@
 //! gRPC service implementation bridging proto types to the manager crate.
 
 use crate::proto::{
-    self, AccountFilter, AccountRecord, BackupStatus, DataFileCapacity, ExecuteMigrationRequest,
-    FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest, GetBackupConfigResponse,
-    GetMigrationAccountsRequest, GetMigrationAccountsResponse,
+    self, AccountFilter, AccountRecord, BackupStatus, DataFileCapacity, ExecuteFilesMigrationRequest,
+    ExecuteMigrationRequest, FormatDataFileRequest, FormatDataFileResponse, GetBackupConfigRequest,
+    GetBackupConfigResponse, GetMigrationAccountsRequest, GetMigrationAccountsResponse,
     GetMigrationSyntheticTransfersRequest, GetMigrationSyntheticTransfersResponse,
     GetStatusRequest, GetStatusResponse, ImportCsvTransfersRequest, LedgerSummary, LogEntry,
     LogLevel, MigrationProgress, ModifyBackupConfigRequest, ModifyBackupConfigResponse,
-    PlanCsvMigrationRequest, PlanCsvMigrationResponse, PlanMigrationRequest, PlanMigrationResponse,
-    ProcessState, ProcessStatus, ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest,
+    PlanCsvMigrationRequest, PlanCsvMigrationResponse, PlanFilesMigrationRequest,
+    PlanFilesMigrationResponse, PlanMigrationRequest, PlanMigrationResponse, ProcessState,
+    ProcessStatus, ReadAccountsRequest, ReadAccountsResponse, ReadTransfersRequest,
     ReadTransfersResponse, StartBackupRequest, StartBackupResponse, StopBackupRequest,
     StopBackupResponse, StreamLogsRequest, SyntheticTransferRecord, TransferFilter,
-    TransferRecord, TriggerBackupRequest, TriggerBackupResponse, UploadCsvTransfersRequest,
-    UploadCsvTransfersResponse, manager_node_server::ManagerNode,
+    TransferRecord, TriggerBackupRequest, TriggerBackupResponse, UploadCsvAccountsRequest,
+    UploadCsvAccountsResponse, UploadCsvTransfersRequest, UploadCsvTransfersResponse,
+    manager_node_server::ManagerNode,
 };
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -55,6 +57,9 @@ pub struct NodeState {
     /// Cached CSV transfers populated by UploadCsvTransfers for pre-flight
     /// review (PlanCsvMigration) and execution (ImportCsvTransfers).
     pub cached_csv_transfers: Arc<RwLock<Vec<tb_reader::Transfer>>>,
+    /// Cached CSV accounts populated by UploadCsvAccounts for the files-only
+    /// migration mode (no source cluster data file is read).
+    pub cached_csv_accounts: Arc<RwLock<Vec<tb_reader::Account>>>,
 }
 
 /// gRPC service for a single manager node.
@@ -1458,6 +1463,245 @@ impl ManagerNode for ManagerNodeService {
             max_timestamp,
         }))
     }
+
+    async fn upload_csv_accounts(
+        &self,
+        request: Request<UploadCsvAccountsRequest>,
+    ) -> Result<Response<UploadCsvAccountsResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.accounts.is_empty() {
+            return Err(Status::invalid_argument("accounts must not be empty"));
+        }
+
+        let accounts: Vec<tb_reader::Account> = req
+            .accounts
+            .into_iter()
+            .map(proto_to_account)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| Status::invalid_argument(format!("invalid account: {e}")))?;
+
+        let count = accounts.len() as u64;
+        let ledgers: std::collections::HashSet<u32> = accounts.iter().map(|a| a.ledger).collect();
+        let ledger_count = ledgers.len() as u32;
+
+        info!(
+            "UploadCsvAccounts: cached {} accounts across {} ledger(s)",
+            count, ledger_count
+        );
+
+        *self.state.cached_csv_accounts.write().await = accounts;
+
+        Ok(Response::new(UploadCsvAccountsResponse {
+            count,
+            ledgers: ledger_count,
+        }))
+    }
+
+    async fn plan_files_migration(
+        &self,
+        request: Request<PlanFilesMigrationRequest>,
+    ) -> Result<Response<PlanFilesMigrationResponse>, Status> {
+        let req = request.into_inner();
+        let cutoff_ts = req.cutoff_ts;
+
+        let cached_accounts = self.state.cached_csv_accounts.read().await;
+        if cached_accounts.is_empty() {
+            return Err(Status::failed_precondition(
+                "no CSV accounts uploaded. Call UploadCsvAccounts first.",
+            ));
+        }
+        let cached_transfers = self.state.cached_csv_transfers.read().await;
+
+        let total_accounts = cached_accounts.len() as u64;
+        let pending_accounts = cached_accounts
+            .iter()
+            .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
+            .count() as u64;
+        let total_csv_transfers = cached_transfers.len() as u64;
+
+        // Build the plan to count the synthetic + windowed transfers it would produce.
+        // BalancePlan::build* consumes its inputs, so clone first.
+        let accounts_clone = cached_accounts.clone();
+        let plan = if cutoff_ts > 0 {
+            let windowed: Vec<tb_reader::Transfer> = cached_transfers
+                .iter()
+                .filter(|t| t.timestamp >= cutoff_ts)
+                .cloned()
+                .collect();
+            tb_compressor::BalancePlan::build_windowed(accounts_clone, windowed, cutoff_ts)
+        } else {
+            tb_compressor::BalancePlan::build(accounts_clone)
+        };
+
+        let synthetic_transfers = plan.synthetic_transfers.len() as u64;
+        let windowed_transfers = plan.windowed_transfers.len() as u64;
+
+        // Per-ledger account summary from the uploaded accounts (not transfers).
+        let mut ledger_map: std::collections::BTreeMap<u32, (u64, u128, u128)> =
+            std::collections::BTreeMap::new();
+        for a in cached_accounts.iter() {
+            let entry = ledger_map.entry(a.ledger).or_insert((0, 0, 0));
+            entry.0 += 1;
+            entry.1 = entry.1.saturating_add(a.debits_posted);
+            entry.2 = entry.2.saturating_add(a.credits_posted);
+        }
+        let ledger_count = ledger_map.len() as u32;
+        let ledger_summaries: Vec<LedgerSummary> = ledger_map
+            .into_iter()
+            .map(|(ledger, (count, debits, credits))| LedgerSummary {
+                ledger,
+                account_count: count,
+                total_debits_posted: debits.to_string(),
+                total_credits_posted: credits.to_string(),
+            })
+            .collect();
+
+        info!(
+            "PlanFilesMigration: accounts={} pending={} synthetic={} windowed={} csv_transfers={} ledgers={}",
+            total_accounts,
+            pending_accounts,
+            synthetic_transfers,
+            windowed_transfers,
+            total_csv_transfers,
+            ledger_count,
+        );
+
+        Ok(Response::new(PlanFilesMigrationResponse {
+            accounts: total_accounts,
+            pending_accounts,
+            synthetic_transfers,
+            windowed_transfers,
+            total_csv_transfers,
+            ledgers: ledger_count,
+            ledger_summaries,
+            safe: pending_accounts == 0,
+        }))
+    }
+
+    type ExecuteFilesMigrationStream =
+        Pin<Box<dyn Stream<Item = Result<MigrationProgress, Status>> + Send + 'static>>;
+
+    async fn execute_files_migration(
+        &self,
+        request: Request<ExecuteFilesMigrationRequest>,
+    ) -> Result<Response<Self::ExecuteFilesMigrationStream>, Status> {
+        let req = request.into_inner();
+
+        if req.target_addresses.is_empty() {
+            return Err(Status::invalid_argument(
+                "target_addresses must not be empty",
+            ));
+        }
+
+        let new_cluster_id: u128 = req.target_cluster_id.parse().map_err(|_| {
+            Status::invalid_argument(format!(
+                "invalid target_cluster_id {:?}: expected decimal u128",
+                req.target_cluster_id
+            ))
+        })?;
+        let cutoff_ts = req.cutoff_ts;
+
+        let cached_accounts = self.state.cached_csv_accounts.read().await.clone();
+        if cached_accounts.is_empty() {
+            return Err(Status::failed_precondition(
+                "no CSV accounts uploaded. Call UploadCsvAccounts first.",
+            ));
+        }
+        let cached_transfers = self.state.cached_csv_transfers.read().await.clone();
+
+        let pending_count = cached_accounts
+            .iter()
+            .filter(|a| a.debits_pending > 0 || a.credits_pending > 0)
+            .count();
+        if pending_count > 0 {
+            warn!(
+                "ExecuteFilesMigration proceeding with {pending_count} account(s) holding \
+                 non-zero pending balances; these will be migrated as-is."
+            );
+        }
+
+        info!(
+            "ExecuteFilesMigration: cluster_id={} addresses={} cutoff_ts={cutoff_ts} \
+             cached_accounts={} cached_transfers={}",
+            req.target_cluster_id,
+            req.target_addresses,
+            cached_accounts.len(),
+            cached_transfers.len(),
+        );
+
+        // Build plan in a blocking task — the same builder ExecuteMigration uses.
+        let plan = tokio::task::spawn_blocking(move || -> tb_compressor::BalancePlan {
+            if cutoff_ts > 0 {
+                let windowed: Vec<tb_reader::Transfer> = cached_transfers
+                    .into_iter()
+                    .filter(|t| t.timestamp >= cutoff_ts)
+                    .collect();
+                tb_compressor::BalancePlan::build_windowed(cached_accounts, windowed, cutoff_ts)
+            } else {
+                tb_compressor::BalancePlan::build(cached_accounts)
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(format!("task join: {e}")))?;
+
+        info!(
+            "ExecuteFilesMigration plan: {} genesis + {} regular accounts, \
+             {} synthetic transfers, {} windowed transfers",
+            plan.genesis_accounts.len(),
+            plan.regular_accounts.len(),
+            plan.total_transfers(),
+            plan.total_windowed_transfers(),
+        );
+
+        let target_addresses = req.target_addresses.clone();
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<tb_compressor::ImportProgress>(32);
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let importer =
+                match tb_compressor::Importer::connect(new_cluster_id, &target_addresses).await {
+                    Ok(imp) => imp,
+                    Err(e) => {
+                        tracing::error!(
+                            "ExecuteFilesMigration: failed to connect to target cluster: {e}"
+                        );
+                        let _ = error_tx.send(format!("{e}"));
+                        return;
+                    }
+                };
+
+            if let Err(e) = importer.import_all_with_progress(&plan, progress_tx).await {
+                tracing::error!("ExecuteFilesMigration: import failed: {e}");
+                let _ = error_tx.send(format!("{e}"));
+            } else {
+                let _ = error_tx.send(String::new());
+            }
+        });
+
+        let stream = async_stream::stream! {
+            while let Some(p) = progress_rx.recv().await {
+                yield Ok(MigrationProgress {
+                    phase: p.phase,
+                    imported: p.imported,
+                    total: p.total,
+                    done: false,
+                    error: String::new(),
+                });
+            }
+            let error_msg = error_rx.await.unwrap_or_default();
+            yield Ok(MigrationProgress {
+                phase: "done".into(),
+                imported: 0,
+                total: 0,
+                done: true,
+                error: error_msg,
+            });
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +2019,39 @@ fn transfer_to_proto(t: tb_reader::Transfer) -> TransferRecord {
         flags: t.flags.raw() as u32,
         timestamp: t.timestamp,
     }
+}
+
+fn proto_to_account(a: AccountRecord) -> Result<tb_reader::Account, String> {
+    Ok(tb_reader::Account {
+        id: a.id.parse::<u128>().map_err(|_| format!("invalid id: {}", a.id))?,
+        debits_pending: a
+            .debits_pending
+            .parse::<u128>()
+            .map_err(|_| format!("invalid debits_pending: {}", a.debits_pending))?,
+        debits_posted: a
+            .debits_posted
+            .parse::<u128>()
+            .map_err(|_| format!("invalid debits_posted: {}", a.debits_posted))?,
+        credits_pending: a
+            .credits_pending
+            .parse::<u128>()
+            .map_err(|_| format!("invalid credits_pending: {}", a.credits_pending))?,
+        credits_posted: a
+            .credits_posted
+            .parse::<u128>()
+            .map_err(|_| format!("invalid credits_posted: {}", a.credits_posted))?,
+        user_data_128: a
+            .user_data_128
+            .parse::<u128>()
+            .map_err(|_| format!("invalid user_data_128: {}", a.user_data_128))?,
+        user_data_64: a.user_data_64,
+        user_data_32: a.user_data_32,
+        reserved: 0,
+        ledger: a.ledger,
+        code: a.code as u16,
+        flags: tb_reader::AccountFlags::from(a.flags as u16),
+        timestamp: a.timestamp,
+    })
 }
 
 fn proto_to_transfer(t: TransferRecord) -> Result<tb_reader::Transfer, String> {
