@@ -77,8 +77,18 @@ tempfile = "3"
 zstd = "0.13"
 
 # AWS
+# `default-features = false` + explicit features drops the s3 crate's default
+# `rustls` feature, which transitively pulls the legacy hyper-0.14 + rustls-0.21
+# connector (RUSTSEC: rustls-webpki 0.101.x, EOL — no fix). We keep
+# `default-https-client` (the modern rustls-aws-lc / rustls-0.23 connector)
+# instead. Re-list the other former-default features so behaviour is unchanged.
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
 
 # Crypto / Signing
 sha2 = "0"
